@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whatsapp-automation"
+version = "0.1.0"
+description = "Système d'automatisation des paiements WhatsApp pour FAI mauritanien"
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{name = "Mohamed Mohamedou"}]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+asyncio_mode = "strict"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

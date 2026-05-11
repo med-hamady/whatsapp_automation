@@ -1,0 +1,44 @@
+# Secrets & config locale
+.env
+.env.*
+!.env.example
+
+# Données runtime (queue + dataset = images clients)
+data/queue.db
+data/queue.db-*
+data/dataset/store/
+
+# Caches Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code (settings locaux utilisateur + verrous runtime + instructions agent)
+.claude/settings.local.json
+.claude/*.lock
+CLAUDE.md
+
+# Logs / temporaire
+*.log
+*.tmp
+
+# Distribution / build
+build/
+dist/
+*.egg-info/

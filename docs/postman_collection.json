@@ -1,0 +1,48 @@
+{
+  "info": {
+    "name": "ai_ocr - Extraction reçus",
+    "description": "Collection Postman pour tester le service local d'extraction OCR.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8008/health",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8008",
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "Extract receipt",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "",
+              "description": "Image du reçu (jpeg/png)"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://127.0.0.1:8008/extract",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8008",
+          "path": ["extract"]
+        }
+      }
+    }
+  ]
+}

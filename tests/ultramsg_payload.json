@@ -1,0 +1,13 @@
+{
+  "event_type": "message_received",
+  "instanceId": "62746",
+  "data": {
+    "id": "false_22237697850@c.us_3EB0",
+    "from": "22237697850@c.us",
+    "to": "22241xxxxxxxx@c.us",
+    "body": "",
+    "type": "image",
+    "media": "https://example.s3.amazonaws.com/recu.jpeg",
+    "fromMe": false
+  }
+}

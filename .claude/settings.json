@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d//**)",
+      "Bash(Get-ChildItem -Path \"D:\\\\Whatsapp\" -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(mkdir -p \"d:\\\\Whatsapp\\\\.claude\")",
+      "Bash(mv \"d:\\\\Whatsapp\\\\AUDIT_webhook.md\" \"d:\\\\Whatsapp\\\\.claude\\\\AUDIT_webhook.md\")"
+    ]
+  }
+}

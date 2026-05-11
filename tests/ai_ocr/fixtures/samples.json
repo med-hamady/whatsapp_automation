@@ -1,0 +1,87 @@
+[
+  {
+    "id": "test_txt_l2",
+    "text": "Payment Successful ! (9 Merchant Name : PATRINET NKTT Merchant Id : 016456 Amount Paid : MRU 1500 Txn ID: 16250529141 2008201 6 Dale 8: Time: 29—O5—25 14:12:02 Done",
+    "expected_template": "bankily",
+    "expected_montant": 1500,
+    "expected_txn_id_prefix": "1625052914",
+    "expected_date_starts": "2025-05-29"
+  },
+  {
+    "id": "test_txt_l16",
+    "text": "Paiement réussi! Nom du commerce nt: PATRINET NKTT ldentiﬁant du marchand: 016456 Montant payé: MRU 1990 Trs ID I 0425112513420946064 Date et heure 2 25-11-25 13:42:11 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 1990,
+    "expected_txn_id_prefix": "0425112513",
+    "expected_date_starts": "2025-11-25"
+  },
+  {
+    "id": "test_txt_l33",
+    "text": "10:32 Paiement réussi! Q) Nom du commergant: PATRINET NKTT Idemiﬂant du marchand: 016456 Montant payé: MRU 990 Trs ID : 1325112610323557566 Date et heure: 26-11-25 10:32:37 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 990,
+    "expected_txn_id_prefix": "1325112610",
+    "expected_date_starts": "2025-11-26"
+  },
+  {
+    "id": "test_txt_l38",
+    "text": "Paiememt réussi! Q) Nom du commercant: PATRINET NKTT Identiﬁant du marchand: 016456 Montant payé: MRU 1990 Trs ID : 1425112611201505966 Date et heure 1 26-11-25 11:20:17 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 1990,
+    "expected_txn_id_prefix": "1425112611",
+    "expected_date_starts": "2025-11-26"
+  },
+  {
+    "id": "test_txt_l46",
+    "text": "14:36 Paiement réussi! Q) Nom du commercant: PATRINET NKTT ldentiﬁant du marchand: 016456 Montant payé: MRU 990 Trs ID : 13251126143610102B1 Date et heure : 26-11-25 14:36:11 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 990,
+    "expected_txn_id_prefix": "13251126143",
+    "expected_date_starts": "2025-11-26"
+  },
+  {
+    "id": "test_txt_l54",
+    "text": "16:05 Paiement réussi! Nom du commergant: PATRINET NKTT Identifiant du marchand: 016456 Montant payé: MRU 990 Trs ID : 12251126160524953931 Date et heure: 26-11-25 16:05:26 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 990,
+    "expected_txn_id_prefix": "12251126160",
+    "expected_date_starts": "2025-11-26"
+  },
+  {
+    "id": "test_txt_l57",
+    "text": "16:15 Paiement réussi! Nom du commergant: PATRINET NKTT ldentiflant du marchand: 016456 Montant payé: MRU 1500 Trs ID : 10251126161532353721 Date et heure: 26-11-25 16:15:34 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 1500,
+    "expected_txn_id_prefix": "10251126161",
+    "expected_date_starts": "2025-11-26"
+  },
+  {
+    "id": "test_txt_l68",
+    "text": "Bankily Notification Paiement réussi! Nom du commercant PATRINET NKTT Jdentmam du marchand: 016456 Montant payé: MRU 990 Trs ID 1325112616545727222 Date et heure: 26-11-25 16:54:59 Effectué",
+    "expected_template": "bankily",
+    "expected_montant": 990,
+    "expected_txn_id_prefix": "1325112616",
+    "expected_date_starts": "2025-11-26"
+  },
+  {
+    "id": "test_txt_l65_masrvi",
+    "text": "16:36 Succés Paiement facture depuis comple 1490.00 MRU(Mom!an!:1490.00 MRU. frais : 0.00 MRU, taxes : 0.00 MRU) paye chez 019370 PATRINET NETWORKING [REF165021159]. C",
+    "expected_template": "masrvi",
+    "expected_montant": 1490,
+    "expected_txn_id_prefix": "REF165021159"
+  },
+  {
+    "id": "test_txt_l59_masrvi",
+    "text": "4:24 Paiement facture Du depuis compte 990.00 MRU (Montant: 990.00 Amm MRU, frais : 0.00 MRU, taxes: 0.00 MRU) payé chez 019370 PATRINET NETWORKING [REF165016222]. OK",
+    "expected_template": "masrvi",
+    "expected_montant": 990,
+    "expected_txn_id_prefix": "REF165016222"
+  },
+  {
+    "id": "test_txt_l71_sedad",
+    "text": "PAT zaa S-X-N? 5955 990.0 PAIEMENT SEDAD BANK BMI dug d.L EIgi 99000 PATRIE NET 01471 Hum 151 17:09:31 20-11-2025 9.10 TR06124615221",
+    "expected_template": "sedad",
+    "expected_montant": 990,
+    "expected_txn_id_prefix": "TR06124615221"
+  }
+]

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Annotation — {{ sample_id }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; color: #222; }
+  .layout { display: flex; gap: 24px; align-items: flex-start; }
+  .image-pane { flex: 1; min-width: 0; }
+  .image-pane img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
+  .form-pane { flex: 1; max-width: 480px; }
+  label { display: block; font-weight: 600; margin-top: 12px; font-size: 14px; }
+  input[type=text], input[type=number], textarea {
+    width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px;
+  }
+  textarea { min-height: 80px; }
+  .pred { color: #888; font-size: 13px; margin-top: 4px; }
+  .actions { margin-top: 18px; display: flex; gap: 8px; }
+  button { padding: 10px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  button.primary { background: #1a5fb4; color: white; }
+  button.skip { background: #eee; color: #333; }
+  details { margin-top: 16px; }
+  pre { background: #fafafa; padding: 12px; overflow-x: auto; font-size: 12px; }
+  a.back { color: #1a5fb4; text-decoration: none; }
+</style>
+</head>
+<body>
+<p><a class="back" href="{{ url_for('index') }}">← Retour à la liste</a></p>
+<h1>Échantillon {{ sample_id }}</h1>
+<div class="layout">
+  <div class="image-pane">
+    <img src="{{ url_for('sample_image', sample_id=sample_id) }}" alt="Reçu">
+    <details>
+      <summary>Texte OCR brut</summary>
+      <pre>{{ prediction.raw_text }}</pre>
+    </details>
+  </div>
+  <form class="form-pane" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p>Template détecté : <strong>{{ prediction.template }}</strong> ·
+       confiance globale : <strong>{{ '%.2f' % prediction.confidence.overall if prediction.confidence.overall else '0.00' }}</strong></p>
+
+    <label>Montant (MRU)
+      <input type="number" name="montant" value="{{ (label.montant if label else prediction.extracted.montant) or '' }}">
+      <div class="pred">Prédiction : {{ prediction.extracted.montant if prediction.extracted.montant is not none else '—' }}</div>
+    </label>
+
+    <label>Txn ID
+      <input type="text" name="txn_id" value="{{ (label.txn_id if label else prediction.extracted.txn_id) or '' }}">
+      <div class="pred">Prédiction : {{ prediction.extracted.txn_id or '—' }}</div>
+    </label>
+
+    <label>Date & heure (ISO 8601)
+      <input type="text" name="date_heure" placeholder="2025-11-26T14:36:11"
+             value="{{ (label.date_heure if label else prediction.extracted.date_heure) or '' }}">
+      <div class="pred">Prédiction : {{ prediction.extracted.date_heure or '—' }}</div>
+    </label>
+
+    <label>Opérateur (Bankily / Sedad / Masrvi / autre)
+      <input type="text" name="operator" value="{{ (label.operator if label else prediction.template) or '' }}">
+    </label>
+
+    <label>
+      <input type="checkbox" name="valid" {% if not label or label.valid %}checked{% endif %}>
+      Reçu jugé valide (extraction utilisable)
+    </label>
+
+    <label>Notes (optionnel)
+      <textarea name="notes">{{ label.notes if label else '' }}</textarea>
+    </label>
+
+    <div class="actions">
+      <button type="submit" class="primary">Enregistrer & suivant</button>
+      <a href="{{ url_for('index') }}"><button type="button" class="skip">Retour</button></a>
+    </div>
+  </form>
+</div>
+</body>
+</html>

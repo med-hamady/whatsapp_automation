@@ -1,0 +1,192 @@
+"""Queue SQLite : persistance + claim atomique pour N workers concurrents.
+
+SQLite gère la concurrence via BEGIN IMMEDIATE. Avec quelques workers
+(2-4) le throughput est largement suffisant.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+import uuid
+from pathlib import Path
+from typing import Optional
+
+from ..models import Job
+from .. import config
+
+
+_SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        config.QUEUE_DB_PATH,
+        isolation_level=None,        # autocommit ; on gère BEGIN nous-mêmes
+        timeout=10.0,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db() -> None:
+    """Crée le fichier queue.db et les tables si absentes."""
+    Path(config.QUEUE_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    with _connect() as conn:
+        conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
+def is_txn_processed(txn_id: str) -> bool:
+    """Vérifie si un txn_id a déjà été traité avec succès."""
+    if not txn_id:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT 1 FROM processed_payments WHERE txn_id = ?",
+            (txn_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def is_txn_in_flight(txn_id: str) -> bool:
+    """Vérifie si un job avec ce txn_id est déjà en queue (pending/processing)."""
+    if not txn_id:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT 1 FROM jobs WHERE txn_id = ? AND status IN ('pending', 'processing', 'retry')",
+            (txn_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def enqueue(job: Job) -> int:
+    """Insère un job en queue. Retourne l'id interne."""
+    now = time.time()
+    payload = job.model_dump_json()
+    with _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO jobs
+               (job_id, txn_id, payload_json, status, next_attempt_at, created_at)
+               VALUES (?, ?, ?, 'pending', ?, ?)""",
+            (job.job_id, job.payment.txn_id, payload, now, now),
+        )
+        return cur.lastrowid
+
+
+def claim_next(worker_id: str) -> Optional[dict]:
+    """Atomiquement : prend le prochain job 'pending' dont next_attempt_at est échu.
+    Le marque 'processing' et retourne le dict {id, job_id, job, attempts}.
+    None s'il n'y a rien à faire."""
+    now = time.time()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                """SELECT id, job_id, payload_json, attempts, step_done
+                   FROM jobs
+                   WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
+                   ORDER BY id ASC
+                   LIMIT 1""",
+                (now,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            conn.execute(
+                """UPDATE jobs
+                   SET status = 'processing', worker_id = ?, started_at = ?, attempts = attempts + 1
+                   WHERE id = ?""",
+                (worker_id, now, row["id"]),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+        return {
+            "id": row["id"],
+            "job_id": row["job_id"],
+            "job": Job.model_validate_json(row["payload_json"]),
+            "attempts": row["attempts"] + 1,
+            "step_done": row["step_done"],
+        }
+
+
+def mark_step_done(job_internal_id: int, step: str) -> None:
+    """Persiste l'avancement (reprise sur incident sans répéter une étape déjà faite)."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET step_done = ? WHERE id = ?",
+            (step, job_internal_id),
+        )
+
+
+def mark_done(job_internal_id: int, txn_id: str, ucrm_payment_id: Optional[str]) -> None:
+    """Marque le job comme terminé et insère dans processed_payments (idempotence)."""
+    now = time.time()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE jobs SET status = 'done', finished_at = ? WHERE id = ?",
+                (now, job_internal_id),
+            )
+            cur = conn.execute(
+                "SELECT job_id FROM jobs WHERE id = ?",
+                (job_internal_id,),
+            )
+            job_id = cur.fetchone()["job_id"]
+            conn.execute(
+                """INSERT OR REPLACE INTO processed_payments
+                   (txn_id, ucrm_payment_id, job_id, processed_at)
+                   VALUES (?, ?, ?, ?)""",
+                (txn_id, ucrm_payment_id, job_id, now),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def mark_retry(job_internal_id: int, error: str, backoff_seconds: float = 30.0) -> None:
+    """Repousse le job pour une nouvelle tentative."""
+    next_at = time.time() + backoff_seconds
+    with _connect() as conn:
+        conn.execute(
+            """UPDATE jobs
+               SET status = 'retry', last_error = ?, next_attempt_at = ?
+               WHERE id = ?""",
+            (error, next_at, job_internal_id),
+        )
+
+
+def mark_failed(job_internal_id: int, error: str) -> None:
+    """Abandon définitif (alerter humain)."""
+    now = time.time()
+    with _connect() as conn:
+        conn.execute(
+            """UPDATE jobs
+               SET status = 'failed', last_error = ?, finished_at = ?
+               WHERE id = ?""",
+            (error, now, job_internal_id),
+        )
+
+
+def stats() -> dict:
+    """Retourne {pending, processing, done, failed, retry} pour monitoring."""
+    with _connect() as conn:
+        cur = conn.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
+        result = {"pending": 0, "processing": 0, "done": 0, "failed": 0, "retry": 0}
+        for row in cur:
+            result[row["status"]] = row["n"]
+        return result
+
+
+def new_job_id() -> str:
+    return uuid.uuid4().hex
