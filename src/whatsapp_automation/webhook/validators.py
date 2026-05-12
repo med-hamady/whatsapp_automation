@@ -25,7 +25,7 @@ def validate_extraction(extracted: dict) -> ValidationResult:
 def validate_client(client: dict | None) -> ValidationResult:
     if client is None:
         return ValidationResult(False, "client_not_found")
-    if client.get("statu") != 1:
+    if client.get("statu") != 2:
         return ValidationResult(False, "client_not_suspended")
     if not client.get("mac"):
         return ValidationResult(False, "client_has_no_mac")

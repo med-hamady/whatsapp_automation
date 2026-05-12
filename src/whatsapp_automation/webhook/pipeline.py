@@ -23,7 +23,7 @@ from .. import config
 from ..models import Client, Job, Payment, Source
 from ..jobqueue import store as queue_store
 from ..db import postgres as pg
-from ..worker import mikrotik, ucrm
+from ..worker import ucrm
 from .ai_ocr_client import extract as ai_ocr_extract
 from .image_downloader import download as download_image
 from .phone import parse_body_number, parse_from_field
@@ -129,26 +129,22 @@ async def process(payload: dict) -> dict:
         crm_balance, amount_paid, crm_balance - amount_paid, unblock,
     )
 
-    # Résolution de la règle firewall MikroTik AVANT l'enqueue, pour que
-    # le worker n'ait AUCUN lookup à faire. On ne fait ce lookup que si on
-    # va effectivement débloquer (inutile sinon).
-    firewall_rule_id = client_row.get("firewall_rule_id")
-    if unblock and not firewall_rule_id:
-        try:
-            firewall_rule_id = await mikrotik.find_rule_id_by_mac(client_row["mac"])
-        except Exception as exc:
-            logger.warning("lookup MikroTik échoué pour mac=%s: %s", client_row["mac"], exc)
-            firewall_rule_id = None
+    # Le worker débloquera en interrogeant MikroTik par IP au moment du
+    # déblocage. On embarque donc l'IP dans le Job ; pas de lookup webhook
+    # côté MikroTik. On garde le phone d'origine (from_phone / body_phone)
+    # pour le payload — le schéma prod ne stocke plus le téléphone sur le
+    # client (info est un texte libre).
+    client_phone = body_phone if (body_phone and not from_phone) else from_phone
 
     # Construction du Job complet — le worker n'aura à faire AUCUN lookup.
     job = Job(
         job_id=queue_store.new_job_id(),
         client=Client(
             id=client_row["idclient"],
-            phone=client_row["num"],
+            phone=client_phone,
             mac_address=client_row["mac"],
+            ip_address=client_row.get("ipaddress"),
             current_status="suspended",
-            firewall_rule_id=firewall_rule_id,
         ),
         payment=Payment(
             amount_mru=amount_paid,

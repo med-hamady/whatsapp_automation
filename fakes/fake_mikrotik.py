@@ -23,15 +23,16 @@ app = FastAPI(title="fake-mikrotik", version="0.1.0")
 class FirewallRule(BaseModel):
     id: str
     mac_address: str
+    src_address: str | None = None         # IP du client suspendu
     action: str = "drop"
     comment: str | None = None
 
 
 # État simulé des règles firewall (par défaut quelques clients suspendus)
 RULES: dict[str, FirewallRule] = {
-    "*1A": FirewallRule(id="*1A", mac_address="AA:BB:CC:00:00:01", comment="Suspended"),
-    "*2B": FirewallRule(id="*2B", mac_address="AA:BB:CC:00:00:02", comment="Suspended"),
-    "*3C": FirewallRule(id="*3C", mac_address="AA:BB:CC:00:00:03", comment="Suspended"),
+    "*1A": FirewallRule(id="*1A", mac_address="AA:BB:CC:00:00:01", src_address="10.0.0.1", comment="Suspended"),
+    "*2B": FirewallRule(id="*2B", mac_address="AA:BB:CC:00:00:02", src_address="10.0.0.2", comment="Suspended"),
+    "*3C": FirewallRule(id="*3C", mac_address="AA:BB:CC:00:00:03", src_address="10.0.0.3", comment="Suspended"),
 }
 
 
@@ -64,12 +65,18 @@ def create_rule(rule: FirewallRule):
 
 @app.get("/firewall/find-by-mac/{mac}")
 def find_by_mac(mac: str):
-    """Equivalent du code PHP GetClientIdRouter : retourne l'id de la règle
-    qui correspond à cette MAC, ou null."""
+    """Retourne l'id de la règle qui correspond à cette MAC, ou null."""
     for rule in RULES.values():
         if rule.mac_address.upper() == mac.upper():
             return {"id": rule.id, "mac": rule.mac_address}
     return {"id": None}
+
+
+@app.get("/firewall/find-by-ip/{ip}")
+def find_by_ip(ip: str):
+    """Retourne tous les ids des règles qui filtrent cette IP (src_address)."""
+    ids = [r.id for r in RULES.values() if r.src_address == ip]
+    return {"ids": ids}
 
 
 @app.get("/health")

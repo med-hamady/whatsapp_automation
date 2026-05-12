@@ -5,7 +5,7 @@
 Usage :
     python -m whatsapp_automation.scripts.init_db [--reset] [--seed]
 
---reset : DROP les tables clients/paiements/jobs/processed_payments avant de
+--reset : DROP les tables client/paiment/jobs/processed_payments avant de
           les recréer (utile pendant le développement).
 --seed  : applique aussi sql/seed.sql après création.
 """
@@ -58,9 +58,14 @@ def _apply_sql(path: Path):
 
 def _reset_tables():
     with psycopg.connect(config.DATABASE_URL, autocommit=True) as conn:
+        # On drop aussi les anciens noms (clients/paiements) pour permettre
+        # le passage d'une ancienne DB de dev à la nouvelle structure.
+        conn.execute("DROP TABLE IF EXISTS paiement CASCADE")
+        conn.execute("DROP TABLE IF EXISTS paiment CASCADE")
         conn.execute("DROP TABLE IF EXISTS paiements CASCADE")
+        conn.execute("DROP TABLE IF EXISTS client CASCADE")
         conn.execute("DROP TABLE IF EXISTS clients CASCADE")
-        print("  → tables paiements + clients DROP")
+        print("  → tables client + paiment DROP")
 
 
 def main():

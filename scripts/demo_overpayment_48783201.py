@@ -1,34 +1,34 @@
-"""Test sur-mesure : phone 48783201, facture 1000 MRU, paie 700 MRU.
+"""Test sur-paiement client 48783201 (idclient=1 dans le seed).
 
-Écart = 1000 - 700 = 300 > seuil 150 → paiement enregistré mais
-client NON débloqué. Message WhatsApp : "il reste 300 MRU à payer".
+Solde dû UCRM = 900 MRU, le client paie 1000 MRU.
+Écart = 900 - 1000 = -100 → avoir 100 MRU, must unblock.
 
-Prérequis : init_db --seed, fakes lancés (9001/9002/9003), worker lancé,
-et le client a été inséré dans Postgres avec idclient=5.
+Prérequis : fakes 9001/9002/9003 lancés, worker lancé, DB seedée.
 """
 from __future__ import annotations
 
-import sys as _sys
+import sys
 import time
-from pathlib import Path as _Path
+from pathlib import Path
 
-_ROOT = _Path(__file__).resolve().parent.parent
-_sys.path.insert(0, str(_ROOT / "src"))
-_sys.path.insert(0, str(_ROOT))
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT / "src"))
+sys.path.insert(0, str(_ROOT))
 
 import httpx
+import psycopg
 
 from whatsapp_automation import config
 from whatsapp_automation.jobqueue import store as queue_store
 from whatsapp_automation.models import Client, Job, Payment, Source
 
 
-CLIENT_ID = 5
+CLIENT_ID = 1
 PHONE = "48783201"
-MAC = "AA:BB:CC:00:00:99"
-IP_ADDRESS = "10.0.0.99"
-BALANCE = 1000
-PAID = 700
+MAC = "AA:BB:CC:00:00:01"
+IP_ADDRESS = "10.0.0.1"
+BALANCE = 900
+PAID = 1000
 
 
 def main() -> None:
@@ -36,13 +36,14 @@ def main() -> None:
 
     diff = BALANCE - PAID
     should_unblock = diff <= config.UNDERPAYMENT_TOLERANCE
-    txn_id = f"TEST-48783201-{int(time.time())}"
+    avoir = max(0, -diff)
+    txn_id = f"OVR-{PHONE}-{int(time.time())}"
 
     print("=" * 70)
-    print(f"TEST sous-paiement client {PHONE}")
+    print(f"TEST sur-paiement client {PHONE}")
     print(f"  balance UCRM = {BALANCE} MRU")
     print(f"  payé         = {PAID} MRU")
-    print(f"  écart        = {diff} MRU (seuil tolérance = {config.UNDERPAYMENT_TOLERANCE})")
+    print(f"  écart        = {diff} MRU (avoir = {avoir} MRU)")
     print(f"  → should_unblock = {should_unblock}")
     print("=" * 70)
 
@@ -64,8 +65,8 @@ def main() -> None:
         ),
         source=Source(
             wnum=PHONE,
-            sample_id="2026-05-11/demo-48783201",
-            received_at="2026-05-11T10:00:00Z",
+            sample_id="2026-05-12/demo-over-48783201",
+            received_at="2026-05-12T10:00:00Z",
         ),
     )
     queue_store.enqueue(job)
@@ -89,29 +90,36 @@ def main() -> None:
     mt_rules = httpx.get(f"{config.MIKROTIK_BASE_URL}/firewall/rules").json()
     msgs = httpx.get(f"{config.ULTRAMSG_BASE_URL}/messages").json()
 
-    print("\n[UCRM] paiements créés :")
-    for p in ucrm_payments:
-        print(f"   {p}")
+    # UCRM : dernier paiement pour ce client
+    pays_for_client = [p for p in ucrm_payments if p.get("clientId") == CLIENT_ID]
+    print(f"\n[UCRM] paiements pour client {CLIENT_ID} :")
+    for p in pays_for_client[-3:]:
+        print(f"   id={p.get('id')} amount={p.get('amount')} method={p.get('methodId','?')[:8]} note={p.get('note')!r}")
 
-    print(f"\n[MikroTik] règles filtrant {IP_ADDRESS} encore présentes ?")
-    rules_for_ip = [r for r in mt_rules if r.get("src_address") == IP_ADDRESS]
-    rules_present = bool(rules_for_ip)
-    expected_present = not should_unblock
-    status = "✅" if rules_present == expected_present else "❌"
-    print(f"   {status} présentes={rules_present} (attendu={expected_present})")
+    # MikroTik : règle bloquant cette MAC encore présente ?
+    rules_for_mac = [r for r in mt_rules if r.get("mac_address","").upper() == MAC.upper()]
+    print(f"\n[MikroTik] règles bloquant {MAC} :")
+    if rules_for_mac:
+        for r in rules_for_mac:
+            print(f"   ❌ {r}")
+    else:
+        print(f"   ✅ aucune (règle supprimée comme attendu)")
 
-    print(f"\n[UltraMsg] messages envoyés à +222{PHONE} :")
-    for m in msgs:
-        if PHONE in m.get("to", ""):
-            print(f"   to={m['to']}")
-            print(f"   caption=\"{m.get('caption', '')}\"")
+    # UltraMsg : message envoyé à +222<phone>
+    msgs_for_client = [m for m in msgs if PHONE in m.get("to","")]
+    print(f"\n[UltraMsg] messages à +222{PHONE} :")
+    for m in msgs_for_client[-2:]:
+        body = m.get("body") or m.get("caption","")
+        print(f"   to={m['to']}")
+        for line in (body or "").splitlines():
+            print(f"     {line}")
 
-    import psycopg
-    print(f"\n[Postgres] table paiment pour client {CLIENT_ID} :")
+    # DB locale
+    print(f"\n[Postgres] paiment pour client {CLIENT_ID} :")
     with psycopg.connect(config.DATABASE_URL) as conn:
         cur = conn.execute(
             "SELECT id_payment, idclient, amount, phone, day, month, year, txn_id "
-            "FROM paiment WHERE idclient = %s ORDER BY id_payment DESC LIMIT 5",
+            "FROM paiment WHERE idclient = %s ORDER BY day DESC, month DESC LIMIT 3",
             (CLIENT_ID,),
         )
         for row in cur.fetchall():
@@ -120,10 +128,13 @@ def main() -> None:
     print(f"\n[Postgres] statut client {CLIENT_ID} :")
     with psycopg.connect(config.DATABASE_URL) as conn:
         cur = conn.execute(
-            "SELECT idclient, info, statu, ipaddress FROM client WHERE idclient = %s",
+            "SELECT idclient, info, statu, mac, ipaddress FROM client WHERE idclient = %s",
             (CLIENT_ID,),
         )
-        print(f"   {cur.fetchone()}  (statu=2 suspendu, 0 actif)")
+        row = cur.fetchone()
+        statu = row[2]
+        mark = "✅ actif" if statu == 0 else f"❌ statu={statu}"
+        print(f"   {row}  → {mark}")
 
 
 if __name__ == "__main__":

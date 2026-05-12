@@ -34,12 +34,12 @@ def test_validate_client_not_suspended():
 
 
 def test_validate_client_no_mac():
-    r = validate_client({"statu": 1, "mac": ""})
+    r = validate_client({"statu": 2, "mac": ""})
     assert not r.ok and r.reason == "client_has_no_mac"
 
 
 def test_validate_client_ok():
-    r = validate_client({"statu": 1, "mac": "AA:BB:CC:DD:EE:FF"})
+    r = validate_client({"statu": 2, "mac": "AA:BB:CC:DD:EE:FF"})
     assert r.ok
 
 

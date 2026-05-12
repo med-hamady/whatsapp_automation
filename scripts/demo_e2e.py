@@ -67,14 +67,16 @@ def main():
             id=1,
             phone="37697850",
             mac_address="AA:BB:CC:00:00:01",
+            ip_address="10.0.0.1",
             current_status="suspended",
-            firewall_rule_id="*1A",
         ),
         payment=Payment(
             amount_mru=1500,
             txn_id=f"DEMO-{int(time.time())}",
             date_heure="2026-05-11T10:00:00",
             operator="bankily",
+            crm_balance_before=1500,
+            should_unblock=True,
         ),
         source=Source(
             wnum="37697850",

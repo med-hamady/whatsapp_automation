@@ -48,6 +48,37 @@ class StepResult:
         self.completed_steps: list[str] = []
 
 
+def _build_message_body(job: Job) -> str:
+    """Construit le message WhatsApp envoyé au client après traitement.
+
+    3 montants sont toujours affichés (total dû / payé / reste). Le ton diffère
+    selon que le client est débloqué ou pas. Le sur-paiement ajoute une ligne
+    `Avoir` pour le crédit en surplus.
+    """
+    total = job.payment.crm_balance_before
+    paid = job.payment.amount_mru
+    diff = total - paid                # >0 reste, <0 sur-paiement
+    remaining = max(0, diff)
+    credit = max(0, -diff)
+
+    lines = [
+        f"Montant total : {total} MRU",
+        f"Montant payé  : {paid} MRU",
+        f"Reste à payer : {remaining} MRU",
+    ]
+    if credit > 0:
+        lines.append(f"Avoir         : {credit} MRU")
+
+    if job.payment.should_unblock:
+        header = "✅ Paiement reçu, votre connexion est réactivée."
+        footer = "Merci !"
+    else:
+        header = "⚠ Paiement enregistré mais incomplet."
+        footer = "Merci de compléter pour réactiver votre connexion."
+
+    return header + "\n\n" + "\n".join(lines) + "\n\n" + footer
+
+
 def _should_skip(target_step: str, last_done: Optional[str]) -> bool:
     """True si target_step ≤ last_done dans l'ordre des étapes."""
     if last_done is None:
@@ -71,26 +102,38 @@ async def process_job(
     result.ucrm_payment_id = known_payment_id
 
     if not _should_skip(STEP_PAID_UCRM, last_step_done):
+        # Note alignée sur la prod PHP (UcrmApiAccess_pay) : "Whatsapp" en dur.
+        # L'opérateur et le txn_id restent tracés via les logs / la DB locale.
         result.ucrm_payment_id = await ucrm.create_payment(
             client_id=job.client.id,
             amount=job.payment.amount_mru,
-            note=f"WhatsApp {job.payment.operator} txn={job.payment.txn_id}",
+            note="Whatsapp",
         )
-        logger.info("UCRM payment created: client=%d amount=%d paymentId=%s",
-                    job.client.id, job.payment.amount_mru, result.ucrm_payment_id)
+        logger.info(
+            "UCRM payment created: client=%d amount=%d paymentId=%s operator=%s txn=%s",
+            job.client.id, job.payment.amount_mru, result.ucrm_payment_id,
+            job.payment.operator, job.payment.txn_id,
+        )
         on_step_done(STEP_PAID_UCRM)
         result.completed_steps.append(STEP_PAID_UCRM)
 
     if not _should_skip(STEP_INSERTED_DB, last_step_done):
+        if not result.ucrm_payment_id:
+            # Ne devrait pas arriver : on n'atteint cette étape qu'après UCRM.
+            raise RuntimeError(
+                f"insert_paiement sans paymentId UCRM (job={job.job_id})"
+            )
         pg.insert_paiement(
             idclient=job.client.id,
-            montant=job.payment.amount_mru,
-            num=job.client.phone,
-            ucrm_payment_id=result.ucrm_payment_id,
+            amount=job.payment.amount_mru,
+            phone=job.client.phone,
+            id_payment=result.ucrm_payment_id,
             txn_id=job.payment.txn_id,
-            operator=job.payment.operator,
         )
-        logger.info("DB insert: client=%d amount=%d", job.client.id, job.payment.amount_mru)
+        logger.info(
+            "DB insert: client=%d amount=%d id_payment=%s",
+            job.client.id, job.payment.amount_mru, result.ucrm_payment_id,
+        )
         on_step_done(STEP_INSERTED_DB)
         result.completed_steps.append(STEP_INSERTED_DB)
 
@@ -104,14 +147,14 @@ async def process_job(
                 job.client.id,
             )
         else:
-            rule_id = job.client.firewall_rule_id
-            if rule_id:
-                removed = await mikrotik.remove_rule(rule_id)
-                logger.info("MikroTik unblock: client=%d mac=%s rule=%s ok=%s",
-                            job.client.id, job.client.mac_address, rule_id, removed)
+            mac = job.client.mac_address
+            if mac:
+                removed = await mikrotik.unblock_by_mac(mac)
+                logger.info("MikroTik unblock: client=%d mac=%s rules_removed=%d",
+                            job.client.id, mac, removed)
             else:
-                logger.warning("pas de firewall_rule_id dans le job (client=%d mac=%s) "
-                               "— skip unblock", job.client.id, job.client.mac_address)
+                logger.warning("pas de mac_address dans le job (client=%d ip=%s) "
+                               "— skip unblock", job.client.id, job.client.ip_address)
         on_step_done(STEP_UNBLOCKED)
         result.completed_steps.append(STEP_UNBLOCKED)
 
@@ -125,22 +168,12 @@ async def process_job(
         result.completed_steps.append(STEP_STATUS_ACTIVE)
 
     if not _should_skip(STEP_PDF_SENT, last_step_done):
-        pdf_url = config.PDF_URL_TEMPLATE.format(payment_id=result.ucrm_payment_id or "0")
-        if job.payment.should_unblock:
-            caption = "Votre paiement a été reçu. Merci !"
-        else:
-            owed = job.payment.crm_balance_before - job.payment.amount_mru
-            caption = (
-                f"Votre paiement de {job.payment.amount_mru} MRU a été enregistré, "
-                f"mais il reste {owed} MRU à payer pour réactiver votre connexion."
-            )
-        await ultramsg.send_document(
+        body = _build_message_body(job)
+        await ultramsg.send_chat(
             to=f"+222{job.client.phone}",
-            document_url=pdf_url,
-            filename=f"recu_{result.ucrm_payment_id or 'ND'}.pdf",
-            caption=caption,
+            body=body,
         )
-        logger.info("PDF envoyé via UltraMsg → +222%s (unblocked=%s)",
+        logger.info("Texte envoyé via UltraMsg → +222%s (unblocked=%s)",
                     job.client.phone, job.payment.should_unblock)
         on_step_done(STEP_PDF_SENT)
         result.completed_steps.append(STEP_PDF_SENT)

@@ -16,8 +16,8 @@ class Client(BaseModel):
     id: int
     phone: str                            # ex "37697850" sans indicatif
     mac_address: str                      # ex "AA:BB:CC:DD:EE:FF"
+    ip_address: Optional[str] = None      # IP attribuée au client (sert au déblocage MikroTik)
     current_status: str                   # "suspended" | "active"
-    firewall_rule_id: Optional[str] = None  # .id côté MikroTik à supprimer
 
 
 class Payment(BaseModel):

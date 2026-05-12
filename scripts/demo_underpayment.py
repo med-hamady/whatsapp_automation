@@ -30,7 +30,7 @@ SCENARIOS = [
         "label": "Paiement exact (client #1 : 1500 dus, paie 1500)",
         "client": {
             "id": 1, "phone": "37697850", "mac": "AA:BB:CC:00:00:01",
-            "firewall_rule_id": "*1A",
+            "ip": "10.0.0.1", "rule_id": "*1A",
         },
         "balance_crm": 1500, "amount_paid": 1500,
         "expect_unblock": True,
@@ -39,7 +39,7 @@ SCENARIOS = [
         "label": "Sous-paiement (client #2 : 1190 dus, paie 1000, écart 190 > 150)",
         "client": {
             "id": 2, "phone": "33848414", "mac": "AA:BB:CC:00:00:02",
-            "firewall_rule_id": "*2B",
+            "ip": "10.0.0.2", "rule_id": "*2B",
         },
         "balance_crm": 1190, "amount_paid": 1000,
         "expect_unblock": False,
@@ -48,7 +48,7 @@ SCENARIOS = [
         "label": "Sur-paiement (client #3 : 990 dus, paie 1200, avoir 210)",
         "client": {
             "id": 3, "phone": "49593871", "mac": "AA:BB:CC:00:00:03",
-            "firewall_rule_id": "*3C",
+            "ip": "10.0.0.3", "rule_id": "*3C",
         },
         "balance_crm": 990, "amount_paid": 1200,
         "expect_unblock": True,
@@ -65,8 +65,8 @@ def _build_job(s: dict) -> Job:
             id=s["client"]["id"],
             phone=s["client"]["phone"],
             mac_address=s["client"]["mac"],
+            ip_address=s["client"]["ip"],
             current_status="suspended",
-            firewall_rule_id=s["client"]["firewall_rule_id"],
         ),
         payment=Payment(
             amount_mru=s["amount_paid"],
@@ -118,7 +118,7 @@ def main():
     messages = httpx.get(f"{config.ULTRAMSG_BASE_URL}/messages").json()
 
     for s, job in enqueued_jobs:
-        rule_id = s["client"]["firewall_rule_id"]
+        rule_id = s["client"]["rule_id"]
         rule_removed = rule_id not in rule_ids
         expected = job.payment.should_unblock
         client_msg = next(

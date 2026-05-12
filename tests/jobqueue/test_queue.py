@@ -35,8 +35,8 @@ def _make_job(txn_id: str = "TXN001", client_id: int = 1) -> Job:
         client=Client(
             id=client_id, phone="37697850",
             mac_address="AA:BB:CC:00:00:01",
+            ip_address="10.0.0.1",
             current_status="suspended",
-            firewall_rule_id="*1A",
         ),
         payment=Payment(
             amount_mru=1500, txn_id=txn_id, operator="bankily",
