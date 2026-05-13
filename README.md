@@ -48,8 +48,6 @@ UltraMsg ──POST──▶ webhook (FastAPI :8010)
 │       ├── db/                    PostgreSQL clients/paiements
 │       └── models/                Pydantic Job/Client/Payment
 │
-├── fakes/                         Faux serveurs UCRM/MikroTik/UltraMsg (tests)
-├── tests/                         Tous les tests pytest
 ├── scripts/                       Scripts CLI + .bat de lancement
 ├── data/                          Runtime : queue.db + dataset/store/
 └── docs/                          Présentation + plans
@@ -64,24 +62,12 @@ python -m pip install -r requirements.txt
 # Configuration
 copy .env.example .env
 
-# Initialisation des bases (PostgreSQL local + SQLite queue)
-python scripts/init_db.py --reset --seed
-
-# Lancement (4 fenêtres)
+# Lancement (3 fenêtres) — la queue SQLite est créée automatiquement au démarrage
+# Aucune initialisation de PostgreSQL : la base prod existe déjà et n'est jamais
+# modifiée par ce code (uniquement SELECT/INSERT/UPDATE sur les lignes).
 scripts\run_ai_ocr.bat               # :8008 — service IA
-scripts\run_fakes.bat                # :9001 :9002 :9003 — fakes
 scripts\run_webhook.bat              # :8010 — webhook
 scripts\run_worker.bat               # worker (relancer N fois pour N workers)
-
-# Démos
-python scripts/demo_e2e.py
-python scripts/demo_underpayment.py
-```
-
-## Tests
-
-```powershell
-pytest
 ```
 
 ## Documentation

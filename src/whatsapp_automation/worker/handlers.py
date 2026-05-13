@@ -8,7 +8,7 @@ Ordre des étapes (chacune idempotente, repérée par step_done) :
   2. db.insert_paiement     (DB locale)
   3. mikrotik.remove_rule   (déblocage)
   4. db.update_client_status → actif (statu=0)
-  5. ultramsg.send_document → PDF reçu envoyé au client
+  5. ultramsg.send_document → PDF reçu envoyé au client (caption = détail montants)
 
 Si une étape a déjà été marquée 'step_done', on saute jusqu'à la suivante.
 """
@@ -168,13 +168,18 @@ async def process_job(
         result.completed_steps.append(STEP_STATUS_ACTIVE)
 
     if not _should_skip(STEP_PDF_SENT, last_step_done):
-        body = _build_message_body(job)
-        await ultramsg.send_chat(
-            to=f"+222{job.client.phone}",
-            body=body,
+        caption = _build_message_body(job)
+        pdf_url = config.PDF_URL_TEMPLATE.format(
+            payment_id=result.ucrm_payment_id or "0",
         )
-        logger.info("Texte envoyé via UltraMsg → +222%s (unblocked=%s)",
-                    job.client.phone, job.payment.should_unblock)
+        await ultramsg.send_document(
+            to=f"+222{job.client.phone}",
+            document_url=pdf_url,
+            filename=f"recu_{result.ucrm_payment_id or 'ND'}.pdf",
+            caption=caption,
+        )
+        logger.info("PDF envoyé via UltraMsg → +222%s (unblocked=%s) url=%s",
+                    job.client.phone, job.payment.should_unblock, pdf_url)
         on_step_done(STEP_PDF_SENT)
         result.completed_steps.append(STEP_PDF_SENT)
 

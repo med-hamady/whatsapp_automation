@@ -8,7 +8,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-_ENV_PATH = Path(__file__).resolve().parent / ".env"
+# .env est cherché à la racine du projet (d:\Whatsapp\.env), pas à côté de
+# ce fichier — c'est la convention standard et évite la duplication.
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 if _ENV_PATH.exists():
     load_dotenv(_ENV_PATH)
 
