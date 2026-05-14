@@ -18,6 +18,30 @@ from ..jobqueue import store as queue_store
 from . import pipeline
 
 
+# Configure le logging applicatif au niveau INFO, sortie stdout + fichier.
+# uvicorn --log-level info ne configure QUE ses propres loggers ; sans cette
+# ligne, les `logger.info(...)` de l'app sont muets (root = WARNING).
+# `force=True` pour réécraser une éventuelle config posée par uvicorn.
+import os as _os
+from logging.handlers import RotatingFileHandler as _RFH
+_LOG_DIR = _os.path.join(_os.getcwd(), "data", "logs")
+_os.makedirs(_LOG_DIR, exist_ok=True)
+_fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
+_file_handler = _RFH(
+    _os.path.join(_LOG_DIR, "webhook.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_fmt)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_fmt)
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[_file_handler, _stream_handler],
+    force=True,
+)
+
 logger = logging.getLogger("whatsapp_automation.webhook")
 
 

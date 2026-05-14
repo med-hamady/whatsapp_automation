@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     payload_json    TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'pending',
     step_done       TEXT,
+    ucrm_payment_id TEXT,
     attempts        INTEGER NOT NULL DEFAULT 0,
     max_attempts    INTEGER NOT NULL DEFAULT 5,
     next_attempt_at REAL NOT NULL,

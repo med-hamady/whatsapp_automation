@@ -34,10 +34,19 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Crée le fichier queue.db et les tables si absentes."""
+    """Crée le fichier queue.db et les tables si absentes.
+
+    Inclut une mini-migration en place pour les déploiements existants : si la
+    table jobs a été créée avant l'ajout de `ucrm_payment_id`, on l'ajoute via
+    ALTER. SQLite est tolérant : ADD COLUMN sans valeur par défaut est une
+    opération en O(1)."""
     Path(config.QUEUE_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        # Migration en place pour les queue.db existants
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "ucrm_payment_id" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN ucrm_payment_id TEXT")
 
 
 def is_txn_processed(txn_id: str) -> bool:
@@ -87,7 +96,7 @@ def claim_next(worker_id: str) -> Optional[dict]:
         conn.execute("BEGIN IMMEDIATE")
         try:
             cur = conn.execute(
-                """SELECT id, job_id, payload_json, attempts, step_done
+                """SELECT id, job_id, payload_json, attempts, step_done, ucrm_payment_id
                    FROM jobs
                    WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
                    ORDER BY id ASC
@@ -115,6 +124,7 @@ def claim_next(worker_id: str) -> Optional[dict]:
             "job": Job.model_validate_json(row["payload_json"]),
             "attempts": row["attempts"] + 1,
             "step_done": row["step_done"],
+            "ucrm_payment_id": row["ucrm_payment_id"],
         }
 
 
@@ -124,6 +134,20 @@ def mark_step_done(job_internal_id: int, step: str) -> None:
         conn.execute(
             "UPDATE jobs SET step_done = ? WHERE id = ?",
             (step, job_internal_id),
+        )
+
+
+def set_payment_id(job_internal_id: int, ucrm_payment_id: str) -> None:
+    """Persiste le paymentId UCRM dès que le paiement a été créé côté UCRM.
+
+    Indispensable pour que les retries du job ne perdent pas l'identifiant
+    après un crash entre l'étape PAID_UCRM et les étapes suivantes (DB,
+    MikroTik, PDF) — sinon on ne saurait plus rattacher le paiement déjà
+    enregistré dans UCRM."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET ucrm_payment_id = ? WHERE id = ?",
+            (ucrm_payment_id, job_internal_id),
         )
 
 

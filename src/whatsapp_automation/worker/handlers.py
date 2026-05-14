@@ -94,9 +94,15 @@ async def process_job(
     last_step_done: Optional[str],
     on_step_done: Callable[[str], None],
     known_payment_id: Optional[str] = None,
+    on_payment_created: Optional[Callable[[str], None]] = None,
 ) -> StepResult:
     """Exécute le job. ``last_step_done`` indique la dernière étape déjà
-    faite avec succès lors d'un précédent essai (None si premier essai)."""
+    faite avec succès lors d'un précédent essai (None si premier essai).
+
+    ``on_payment_created`` est invoqué dès qu'UCRM a renvoyé le paymentId,
+    AVANT de marquer l'étape comme done. C'est ce qui garantit qu'un crash
+    juste après l'appel UCRM ne perd pas l'identifiant : il est persisté
+    dans la queue avant la moindre étape suivante."""
 
     result = StepResult()
     result.ucrm_payment_id = known_payment_id
@@ -114,6 +120,8 @@ async def process_job(
             job.client.id, job.payment.amount_mru, result.ucrm_payment_id,
             job.payment.operator, job.payment.txn_id,
         )
+        if on_payment_created is not None and result.ucrm_payment_id:
+            on_payment_created(result.ucrm_payment_id)
         on_step_done(STEP_PAID_UCRM)
         result.completed_steps.append(STEP_PAID_UCRM)
 

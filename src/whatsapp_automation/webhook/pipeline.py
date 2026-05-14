@@ -52,6 +52,15 @@ async def process(payload: dict) -> dict:
     from_phone = parse_from_field(event_data.get("from", ""))
     body_phone = parse_body_number(event_data.get("body", ""))
     media_url = event_data.get("media")
+    msg_type = (event_data.get("type") or "").lower()
+
+    # On ne traite que les images. UltraMsg envoie aussi des stickers, vidéos,
+    # audio (voice notes), documents PDF — ils ont un `media` mais ne sont pas
+    # des reçus de paiement. On les drop AVANT de télécharger pour éviter
+    # bande passante inutile et un 400 systématique côté ai_ocr.
+    if msg_type and msg_type != "image":
+        logger.info("type=%s non supporté, drop (from=%s)", msg_type, from_phone)
+        return {"status": "skipped", "reason": f"unsupported_type:{msg_type}"}
 
     if not media_url:
         logger.info("no media, drop (from=%s)", from_phone)

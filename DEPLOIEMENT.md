@@ -121,7 +121,7 @@ python -c "import asyncio; from whatsapp_automation.worker import ucrm; print(as
 
 ### 6.3 — MikroTik (connexion RouterOS)
 ```powershell
-python -c "from librouteros import connect; from whatsapp_automation import config; api=connect(username=config.MIKROTIK_USER, password=config.MIKROTIK_PASSWORD, host=config.MIKROTIK_HOST, port=config.MIKROTIK_PORT, timeout=config.MIKROTIK_TIMEOUT); print('routeros OK', list(api(cmd='/system/identity/print'))); api.close()"
+python -c "from librouteros import connect; from whatsapp_automation import config; api=connect(username=config.MIKROTIK_USER, password=config.MIKROTIK_PASSWORD, host=config.MIKROTIK_HOST, port=config.MIKROTIK_PORT, timeout=config.MIKROTIK_TIMEOUT); print('routeros OK', list(api('/system/identity/print'))); api.close()"
 ```
 → doit afficher l'identité du routeur.
 

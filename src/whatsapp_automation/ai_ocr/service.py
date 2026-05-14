@@ -36,6 +36,26 @@ from .pipeline import process_image
 from .dataset.writer import save_sample
 
 
+# Configure le logging applicatif au niveau INFO, sortie stdout + fichier.
+from logging.handlers import RotatingFileHandler as _RFH
+_LOG_DIR = os.path.join(os.getcwd(), "data", "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
+_file_handler = _RFH(
+    os.path.join(_LOG_DIR, "ai_ocr.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_fmt)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_fmt)
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[_file_handler, _stream_handler],
+    force=True,
+)
+
 logger = logging.getLogger("whatsapp_automation.ai_ocr.service")
 
 

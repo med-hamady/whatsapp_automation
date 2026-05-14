@@ -57,33 +57,44 @@ def insert_paiement(
     idclient: int,
     amount: int,
     phone: str,
-    id_payment: str,
+    id_payment: str | int,
     txn_id: str | None,
     paid_at: datetime | None = None,
-) -> str:
+) -> int:
     """Insère un paiement dans `paiment`.
 
     `id_payment` est le paymentId retourné par UCRM (PRIMARY KEY de la table
-    en prod — non auto-incrément). La date est éclatée en day/month/year
-    (schéma prod). `paid_at` par défaut = maintenant (UTC).
+    en prod — non auto-incrément, colonne `integer`). On accepte str ou int
+    en entrée et on caste : UCRM le renvoie en str (paymentCovers[0].paymentId),
+    mais la colonne prod attend un integer.
+
+    `txn_id` est nullable (autres systèmes écrivant dans `paiment` peuvent ne
+    pas le fournir).
     """
     dt = paid_at or datetime.now(timezone.utc)
+    id_payment_int = int(id_payment)
     with connection() as conn:
         conn.execute(
             """INSERT INTO paiment
                (id_payment, idclient, phone, amount, day, month, year, txn_id)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (id_payment, idclient, phone, amount, dt.day, dt.month, dt.year, txn_id),
+            (id_payment_int, idclient, phone, amount, dt.day, dt.month, dt.year, txn_id),
         )
-    return id_payment
+    return id_payment_int
 
 
-def update_client_status(idclient: int, statu: int) -> None:
-    """Met à jour statu (codes PROD : 0 = actif, 2 = suspendu)."""
+def update_client_status(idclient: int | str, statu: int) -> None:
+    """Met à jour statu (codes PROD : 0 = actif, 2 = suspendu).
+
+    ⚠ Schéma prod incohérent : `client.idclient` est `VARCHAR(250)` alors
+    que `paiment.idclient` est `INTEGER`. On caste en str ici pour matcher
+    le type réel de la colonne (sinon : `operator does not exist:
+    character varying = smallint`).
+    """
     with connection() as conn:
         conn.execute(
             "UPDATE client SET statu = %s WHERE idclient = %s",
-            (statu, idclient),
+            (statu, str(idclient)),
         )
 
 

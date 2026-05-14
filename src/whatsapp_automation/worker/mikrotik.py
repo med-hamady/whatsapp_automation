@@ -98,12 +98,10 @@ def _routeros_unblock_sync(mac: str) -> int:
         timeout=config.MIKROTIK_TIMEOUT,
     )
     try:
-        rules = list(api(
-            cmd="/ip/firewall/filter/print",
-            **{
-                "?src-mac-address": mac.upper(),
-                "?action": "drop",
-            },
+        rules = list(api.rawCmd(
+            "/ip/firewall/filter/print",
+            f"?src-mac-address={mac.upper()}",
+            "?action=drop",
         ))
         removed = 0
         for rule in rules:
@@ -111,7 +109,7 @@ def _routeros_unblock_sync(mac: str) -> int:
             if not rule_id:
                 continue
             try:
-                tuple(api(cmd="/ip/firewall/filter/remove", **{"=.id": rule_id}))
+                tuple(api.rawCmd("/ip/firewall/filter/remove", f"=.id={rule_id}"))
                 removed += 1
             except Exception as exc:  # pragma: no cover - dépendance réseau
                 logger.warning("MikroTik remove .id=%s failed: %s", rule_id, exc)

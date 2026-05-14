@@ -42,14 +42,28 @@ async def _run_once(worker_id: str) -> bool:
     internal_id = claimed["id"]
     attempt = claimed["attempts"]
     last_step = claimed.get("step_done")
+    known_payment_id = claimed.get("ucrm_payment_id")
 
-    logger.info("claim job_id=%s attempt=%d last_step=%s", job.job_id, attempt, last_step)
+    logger.info(
+        "claim job_id=%s attempt=%d last_step=%s known_payment_id=%s",
+        job.job_id, attempt, last_step, known_payment_id,
+    )
 
     def on_step_done(step: str):
         queue_store.mark_step_done(internal_id, step)
 
+    def on_payment_created(payment_id: str):
+        # Persiste IMMÉDIATEMENT le paymentId UCRM. Si le worker crashe juste
+        # après, le prochain claim retrouvera ce paymentId via known_payment_id
+        # et n'essaiera pas de re-créer un paiement chez UCRM (= double paiement).
+        queue_store.set_payment_id(internal_id, payment_id)
+
     try:
-        result = await handlers.process_job(job, last_step, on_step_done)
+        result = await handlers.process_job(
+            job, last_step, on_step_done,
+            known_payment_id=known_payment_id,
+            on_payment_created=on_payment_created,
+        )
         queue_store.mark_done(internal_id, job.payment.txn_id, result.ucrm_payment_id)
         logger.info("job %s ✅ done steps=%s", job.job_id, result.completed_steps)
     except Exception as exc:
@@ -81,10 +95,18 @@ async def run_forever():
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    )
+    from logging.handlers import RotatingFileHandler
+    log_dir = os.path.join(os.getcwd(), "data", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    # Un fichier par PID pour éviter que deux workers concurrents se
+    # marchent dessus en écriture sur le même fichier.
+    log_file = os.path.join(log_dir, f"worker-{os.getpid()}.log")
+    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
+    fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logging.basicConfig(level=logging.INFO, handlers=[fh, sh], force=True)
     signal.signal(signal.SIGINT, _stop)
     try:
         signal.signal(signal.SIGTERM, _stop)
