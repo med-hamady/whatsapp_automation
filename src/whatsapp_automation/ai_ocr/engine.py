@@ -13,7 +13,9 @@ sous-jacente n'est pas garantie thread-safe pour tous les builds RapidOCR.
 
 from __future__ import annotations
 
+import gc
 import io
+import logging
 import os
 from dataclasses import dataclass, field
 from threading import Lock
@@ -21,6 +23,9 @@ from typing import List, Optional
 
 from PIL import Image, ImageOps
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,7 +62,24 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 _DEFAULT_MAX_WIDTH = _env_int("OCR_MAX_WIDTH", 1500)
+# Cap sur la *plus grande* dimension (largeur OU hauteur). Sans ça, un
+# screenshot WhatsApp vertical type 1080×4500 passe tel quel au détecteur
+# DBNet (entrée dynamique) et fait exploser l'allocation ONNX en
+# concurrence — "bad allocation" sur les nœuds Clip/Add du détecteur.
+_DEFAULT_MAX_DIM = _env_int("OCR_MAX_DIM", 1600)
+# Cap de repli quand la 1re passe lève une bad-alloc ONNX.
+_RETRY_MAX_DIM = _env_int("OCR_RETRY_MAX_DIM", 1024)
+# Bornage interne du détecteur DBNet. Le défaut RapidOCR (limit_side_len=736,
+# limit_type=min) n'agit jamais sur des captures hautes : min(w,h)=w est déjà
+# > 736 → aucun resize. On force le mode "max" pour garantir une borne.
+_DET_LIMIT_SIDE_LEN = _env_int("OCR_DET_LIMIT_SIDE_LEN", 1280)
+_DET_LIMIT_TYPE = os.environ.get("OCR_DET_LIMIT_TYPE", "max")
 _USE_CLS = _env_bool("OCR_USE_CLS", False)
+
+
+def _is_bad_alloc(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "bad allocation" in msg or "bad_alloc" in msg
 
 
 class _Engine:
@@ -72,6 +94,8 @@ class _Engine:
             "EngineConfig.onnxruntime.intra_op_num_threads": threads,
             "EngineConfig.onnxruntime.inter_op_num_threads": threads,
             "Global.use_cls": _USE_CLS,
+            "Det.limit_side_len": _DET_LIMIT_SIDE_LEN,
+            "Det.limit_type": _DET_LIMIT_TYPE,
         }
         self._ocr = RapidOCR(params=params)
         # Sérialise les appels à self._ocr : les sessions ONNX sous-jacentes
@@ -93,27 +117,59 @@ class _Engine:
         return cls._instance
 
     def run(self, image_bytes: bytes) -> OcrResult:
-        img = self._preprocess(image_bytes)
-        with self._run_lock:
-            raw = self._ocr(img)
-        return self._normalize(raw)
+        return self._run_with_retry(image_bytes, boost_contrast=False)
 
     def run_with_contrast(self, image_bytes: bytes) -> OcrResult:
         """2e passe : image avec contraste boosté pour les Sedad arabes où le
         montant noir est noyé dans du texte arabe gris."""
-        img = self._preprocess(image_bytes, boost_contrast=True)
-        with self._run_lock:
-            raw = self._ocr(img)
+        return self._run_with_retry(image_bytes, boost_contrast=True)
+
+    def _run_with_retry(self, image_bytes: bytes, *, boost_contrast: bool) -> "OcrResult":
+        img = self._preprocess(image_bytes, boost_contrast=boost_contrast)
+        try:
+            with self._run_lock:
+                raw = self._ocr(img)
+        except Exception as exc:
+            if not _is_bad_alloc(exc):
+                raise
+            logger.warning(
+                "ONNX bad_alloc sur image %sx%s, retry à max_dim=%d",
+                img.shape[1], img.shape[0], _RETRY_MAX_DIM,
+            )
+            del img
+            gc.collect()
+            img = self._preprocess(
+                image_bytes, boost_contrast=boost_contrast, max_dim=_RETRY_MAX_DIM
+            )
+            with self._run_lock:
+                raw = self._ocr(img)
         return self._normalize(raw)
 
     @staticmethod
-    def _preprocess(image_bytes: bytes, boost_contrast: bool = False) -> np.ndarray:
+    def _preprocess(
+        image_bytes: bytes,
+        boost_contrast: bool = False,
+        *,
+        max_dim: Optional[int] = None,
+    ) -> np.ndarray:
+        cap = max_dim if max_dim is not None else _DEFAULT_MAX_DIM
         with Image.open(io.BytesIO(image_bytes)) as im:
             im = ImageOps.exif_transpose(im).convert("RGB")
+            # Borne 1 : largeur (rétrocompat OCR_MAX_WIDTH).
             max_w = _DEFAULT_MAX_WIDTH
             if im.width > max_w:
                 ratio = max_w / im.width
                 im = im.resize((max_w, int(im.height * ratio)), Image.LANCZOS)
+            # Borne 2 : plus grande dimension. Indispensable pour les
+            # screenshots verticaux dont la hauteur n'est pas couverte par
+            # OCR_MAX_WIDTH.
+            longest = max(im.width, im.height)
+            if longest > cap:
+                ratio = cap / longest
+                im = im.resize(
+                    (max(1, int(im.width * ratio)), max(1, int(im.height * ratio))),
+                    Image.LANCZOS,
+                )
             if boost_contrast:
                 gray = ImageOps.grayscale(im)
                 stretched = ImageOps.autocontrast(gray, cutoff=8)

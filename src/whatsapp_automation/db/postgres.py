@@ -39,6 +39,10 @@ def get_client_by_phone(phone: str) -> Optional[dict]:
 
     Le téléphone est cherché par sous-chaîne dans le champ texte `info`
     (le schéma prod n'a pas de colonne phone dédiée sur la table client).
+
+    `idclient` est VARCHAR(250) en prod mais contient toujours un entier ;
+    on caste ici pour que tout le code en aval (modèle pydantic Client.id,
+    signatures UCRM, formats %d dans les logs) puisse le traiter comme int.
     """
     if not phone:
         return None
@@ -50,7 +54,10 @@ def get_client_by_phone(phone: str) -> Optional[dict]:
                LIMIT 1""",
             (f"%{phone}%",),
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+        if row is not None:
+            row["idclient"] = int(row["idclient"])
+        return row
 
 
 def insert_paiement(

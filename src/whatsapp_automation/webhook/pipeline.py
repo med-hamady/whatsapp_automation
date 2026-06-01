@@ -15,9 +15,12 @@ téléchargement et l'appel ai_ocr. Le worker ne fait jamais ces lookups.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
+
+import httpx
 
 from .. import config
 from ..models import Client, Job, Payment, Source
@@ -39,8 +42,46 @@ from .validators import (
 logger = logging.getLogger("whatsapp_automation.webhook.pipeline")
 
 
+# Backoff entre tentatives UCRM get_balance. 3 essais au total ; ~4s max
+# d'attente cumulée avant d'abandonner. La requête tourne dans une asyncio
+# Task détachée (cf. app._safe_process) donc on ne bloque pas UltraMsg.
+UCRM_GET_BALANCE_DELAYS = (0, 1, 3)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+async def _get_balance_with_retry(client_id: int) -> Optional[int]:
+    """Appelle ucrm.get_balance avec retry sur erreurs transitoires.
+
+    Retourne None si toutes les tentatives échouent (timeout, réseau, 5xx)
+    OU si UCRM renvoie une 4xx (erreur métier, inutile de retry).
+    """
+    last_exc: Optional[Exception] = None
+    for attempt, delay in enumerate(UCRM_GET_BALANCE_DELAYS, 1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await ucrm.get_balance(client_id)
+        except httpx.HTTPStatusError as exc:
+            # 4xx → erreur métier (client introuvable, token invalide…)
+            # inutile de retry, on coupe court.
+            if 400 <= exc.response.status_code < 500:
+                logger.warning(
+                    "UCRM get_balance client=%d HTTP %d : abandon (pas de retry)",
+                    client_id, exc.response.status_code,
+                )
+                return None
+            last_exc = exc
+        except Exception as exc:
+            last_exc = exc
+        logger.warning(
+            "UCRM get_balance tentative %d/%d KO client=%d : %s: %r",
+            attempt, len(UCRM_GET_BALANCE_DELAYS), client_id,
+            type(last_exc).__name__, last_exc,
+        )
+    return None
 
 
 async def process(payload: dict) -> dict:
@@ -120,35 +161,31 @@ async def process(payload: dict) -> dict:
         logger.info("validation client KO: %s (phone=%s)", valid_client.reason, from_phone)
         return {"status": "skipped", "reason": valid_client.reason}
 
-    # Lookup solde dû côté CRM. Si <= 0 → client à jour, on n'empile pas
-    # (équivalent du check $amountCRM <= 0 dans remove_suspende_whatsapp.php).
-    # En cas d'erreur réseau on continue (le worker fera retry sur POST).
-    crm_balance: Optional[int] = None
-    try:
-        crm_balance = await ucrm.get_balance(client_row["idclient"])
-    except Exception as exc:
-        logger.warning("UCRM get_balance échoué pour client=%d : %s",
-                       client_row["idclient"], exc)
+    # Lookup solde dû côté CRM avec retry sur erreurs transitoires.
+    # On skip uniquement si toutes les tentatives ont échoué. Si balance <= 0
+    # on continue : le paiement sera enregistré comme avoir/crédit côté UCRM.
+    crm_balance = await _get_balance_with_retry(client_row["idclient"])
 
     valid_balance = validate_crm_balance(crm_balance)
     if not valid_balance.ok:
-        logger.info("solde CRM <= 0 (client=%d balance=%s) — skip",
-                    client_row["idclient"], crm_balance)
+        logger.info("UCRM injoignable (client=%d) — skip", client_row["idclient"])
         return {"status": "skipped", "reason": valid_balance.reason}
 
     # Décision métier : faut-il débloquer le client ?
-    # - Si payé ≥ dû − tolérance (150 par défaut) → on débloque.
-    # - Sinon (sous-paiement > 150) → on enregistre le paiement mais on
-    #   garde le client suspendu.
+    # - Si payé ≥ dû − tolérance (150 par défaut) ET client suspendu → on débloque.
+    # - Sinon : on enregistre le paiement mais on ne touche pas MikroTik/statu
+    #   (sous-paiement, ou client déjà actif qui paie en avance).
     amount_paid = int(extracted["montant"])
-    unblock = should_unblock_client(
+    was_suspended = client_row.get("statu") == 2
+    unblock = was_suspended and should_unblock_client(
         amount_paid=amount_paid,
         crm_balance=crm_balance,
         threshold=config.UNDERPAYMENT_TOLERANCE,
     )
     logger.info(
-        "décision : balance=%s payé=%s écart=%s → unblock=%s",
-        crm_balance, amount_paid, crm_balance - amount_paid, unblock,
+        "décision : statu=%s balance=%s payé=%s écart=%s → unblock=%s",
+        client_row.get("statu"), crm_balance, amount_paid,
+        crm_balance - amount_paid, unblock,
     )
 
     # Le worker débloquera en interrogeant MikroTik par IP au moment du
@@ -164,9 +201,9 @@ async def process(payload: dict) -> dict:
         client=Client(
             id=client_row["idclient"],
             phone=client_phone,
-            mac_address=client_row["mac"],
+            mac_address=client_row.get("mac"),
             ip_address=client_row.get("ipaddress"),
-            current_status="suspended",
+            current_status="suspended" if was_suspended else "active",
         ),
         payment=Payment(
             amount_mru=amount_paid,

@@ -121,12 +121,16 @@ def validate_recipient_name(template: str, raw_text: Optional[str]) -> Validatio
 
 
 def validate_client(client: dict | None) -> ValidationResult:
+    """On accepte tous les statuts : un client actif peut payer en avance, ou
+    avoir été débloqué entre-temps par un autre canal. Le pipeline décidera
+    s'il faut effectivement débloquer MikroTik via `should_unblock`.
+
+    La MAC reste indispensable côté schéma (NOT NULL en prod) ; on n'exige plus
+    qu'elle soit utilisable pour MikroTik puisqu'un client déjà actif n'a pas
+    de règle à supprimer.
+    """
     if client is None:
         return ValidationResult(False, "client_not_found")
-    if client.get("statu") != 2:
-        return ValidationResult(False, "client_not_suspended")
-    if not client.get("mac"):
-        return ValidationResult(False, "client_has_no_mac")
     return ValidationResult(True)
 
 
@@ -140,15 +144,15 @@ def validate_amount(montant_paye: int, client_balance: Optional[int] = None) -> 
 
 
 def validate_crm_balance(balance: Optional[int]) -> ValidationResult:
-    """Le solde CRM est OBLIGATOIRE pour décider s'il faut débloquer.
+    """Le solde CRM est OBLIGATOIRE pour pouvoir construire le job (sert au
+    message client et à la décision de déblocage).
     - None (CRM injoignable) → on n'empile pas, on attend que CRM remonte.
-    - <= 0 → client déjà à jour, rien à faire.
-    - > 0 → solde valide, on peut continuer.
+    - <= 0 → client déjà à jour ou en avoir : on enregistre quand même le
+      paiement (UCRM créera un crédit/avoir), on ne débloque juste pas.
+    - > 0 → solde dû, traitement normal.
     """
     if balance is None:
         return ValidationResult(False, "crm_unreachable")
-    if balance <= 0:
-        return ValidationResult(False, "client_already_paid_up")
     return ValidationResult(True)
 
 

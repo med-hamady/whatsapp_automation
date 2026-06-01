@@ -72,6 +72,9 @@ def _build_message_body(job: Job) -> str:
     if job.payment.should_unblock:
         header = "✅ Paiement reçu, votre connexion est réactivée."
         footer = "Merci !"
+    elif job.client.current_status == "active":
+        header = "✅ Paiement reçu, merci."
+        footer = "Votre compte est à jour."
     else:
         header = "⚠ Paiement enregistré mais incomplet."
         footer = "Merci de compléter pour réactiver votre connexion."
@@ -156,13 +159,17 @@ async def process_job(
             )
         else:
             mac = job.client.mac_address
-            if mac:
+            # Le préfixe `pending-` est un placeholder posé par le sync UCRM
+            # pour les clients pas encore provisionnés côté MikroTik
+            # (cf. scripts/sync_clients_from_ucrm.py). Pas de règle à supprimer.
+            if mac and not mac.startswith("pending-"):
                 removed = await mikrotik.unblock_by_mac(mac)
                 logger.info("MikroTik unblock: client=%d mac=%s rules_removed=%d",
                             job.client.id, mac, removed)
             else:
-                logger.warning("pas de mac_address dans le job (client=%d ip=%s) "
-                               "— skip unblock", job.client.id, job.client.ip_address)
+                logger.warning("pas de mac_address valide dans le job (client=%d "
+                               "mac=%r ip=%s) — skip unblock",
+                               job.client.id, mac, job.client.ip_address)
         on_step_done(STEP_UNBLOCKED)
         result.completed_steps.append(STEP_UNBLOCKED)
 
