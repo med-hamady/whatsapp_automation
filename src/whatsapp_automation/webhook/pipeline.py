@@ -32,6 +32,7 @@ from .validators import (
     validate_client,
     validate_crm_balance,
     validate_extraction,
+    validate_recipient_name,
 )
 
 
@@ -77,11 +78,23 @@ async def process(payload: dict) -> dict:
     extracted = ocr_response.get("extracted") or {}
     sample_id = ocr_response.get("sample_id", "")
     template = ocr_response.get("template", "generic")
+    raw_text = ocr_response.get("raw_text") or ""
 
     valid_ext = validate_extraction(extracted)
     if not valid_ext.ok:
         logger.info("extraction invalide: %s", valid_ext.reason)
         return {"status": "skipped", "reason": valid_ext.reason}
+
+    # Anti-fraude : on n'accepte le paiement que si le nom du destinataire
+    # PATRINET / A2 CONNECT / PATRIE NET apparaît dans la capture. Bloque
+    # les reçus envoyés vers un autre compte.
+    valid_recipient = validate_recipient_name(template, raw_text)
+    if not valid_recipient.ok:
+        logger.info(
+            "destinataire KO: %s (template=%s, from=%s)",
+            valid_recipient.reason, template, from_phone,
+        )
+        return {"status": "skipped", "reason": valid_recipient.reason}
 
     txn_id: Optional[str] = extracted.get("txn_id") or ""
 
