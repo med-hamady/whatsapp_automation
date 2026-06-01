@@ -126,16 +126,16 @@ async def process(payload: dict) -> dict:
         logger.info("extraction invalide: %s", valid_ext.reason)
         return {"status": "skipped", "reason": valid_ext.reason}
 
-    # Anti-fraude : on n'accepte le paiement que si le nom du destinataire
-    # PATRINET / A2 CONNECT / PATRIE NET apparaît dans la capture. Bloque
-    # les reçus envoyés vers un autre compte.
+    # Détection (mode observation) : on vérifie que PATRINET / A2 CONNECT /
+    # PATRIE NET apparaît dans la capture, mais on NE BLOQUE PAS le paiement
+    # en cas d'échec. On loggue un WARNING pour pouvoir mesurer le taux de
+    # mismatch en prod avant de durcir en rejet effectif.
     valid_recipient = validate_recipient_name(template, raw_text)
     if not valid_recipient.ok:
-        logger.info(
-            "destinataire KO: %s (template=%s, from=%s)",
+        logger.warning(
+            "destinataire suspect (PASS-THROUGH) : %s (template=%s, from=%s)",
             valid_recipient.reason, template, from_phone,
         )
-        return {"status": "skipped", "reason": valid_recipient.reason}
 
     txn_id: Optional[str] = extracted.get("txn_id") or ""
 
