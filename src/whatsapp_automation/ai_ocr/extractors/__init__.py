@@ -9,9 +9,13 @@ from .bankily import BankilyExtractor
 from .sedad import SedadExtractor
 from .masrvi import MasrviExtractor
 from .generic import GenericExtractor
+from .subscription_form import SubscriptionFormExtractor
 
 
 _EXTRACTORS: List[BaseExtractor] = [
+    # En tête : écarte les fiches "NOUVEL ABONNEMENT" avant qu'un extracteur
+    # de reçu (Sedad sur "non-paiement") ne les capte par erreur.
+    SubscriptionFormExtractor(),
     BankilyExtractor(),
     SedadExtractor(),
     MasrviExtractor(),

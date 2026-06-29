@@ -3,10 +3,9 @@
 .env.*
 !.env.example
 
-# Données runtime (queue + dataset = images clients)
-data/queue.db
-data/queue.db-*
-data/dataset/store/
+# Données runtime (queue, events, logs, dataset = données clients sensibles).
+# On ignore tout le dossier data/ : rien n'y est destiné au dépôt.
+data/
 
 # Caches Python
 __pycache__/

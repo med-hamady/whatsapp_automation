@@ -21,6 +21,16 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_status_next ON jobs(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_txn ON jobs(txn_id);
 
+-- Idempotence atomique : interdit deux jobs actifs (pending/processing/retry)
+-- avec le même txn_id. Le check `is_txn_in_flight` côté webhook a une fenêtre
+-- de race (TOCTOU) quand plusieurs webhooks UltraMsg du même reçu arrivent en
+-- parallèle ; cet index force l'unicité au niveau SQLite, l'INSERT échoue
+-- avec IntegrityError sur les doublons. txn_id != '' car certains opérateurs
+-- (masrvi, generic) n'ont pas de txn_id extractible.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_txn_active
+    ON jobs(txn_id)
+    WHERE txn_id != '' AND status IN ('pending', 'processing', 'retry');
+
 CREATE TABLE IF NOT EXISTS processed_payments (
     txn_id          TEXT PRIMARY KEY,
     ucrm_payment_id TEXT,

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Supervision — Connexion</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #fafbfc; color: #31404a; border-top: 4px solid #516ca9;
+      display: flex; align-items: center; justify-content: center; min-height: 100vh;
+    }
+    .card {
+      background: #ffffff; padding: 32px; border-radius: 14px; width: 320px;
+      border: 1px solid #dde1e4; box-shadow: 0 12px 34px rgba(39,53,100,.12);
+    }
+    .brand-logo { height: 40px; width: auto; display: block; margin: 0 auto 18px; }
+    h1 { font-size: 18px; margin: 0 0 4px; color: #273564; }
+    p.sub { margin: 0 0 20px; color: #8b93a0; font-size: 13px; }
+    label { display: block; font-size: 13px; margin-bottom: 6px; color: #48545c; }
+    input {
+      width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #dde1e4;
+      background: #fafbfc; color: #31404a; font-size: 14px;
+    }
+    input:focus { outline: none; border-color: #516ca9; box-shadow: 0 0 0 3px #eef1f8; }
+    button {
+      margin-top: 16px; width: 100%; padding: 10px; border: 0; border-radius: 8px;
+      background: #516ca9; color: white; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: #273564; }
+    .err { color: #cc3a1a; font-size: 13px; margin-top: 12px; min-height: 16px; }
+  </style>
+</head>
+<body>
+  <form class="card" id="loginForm">
+    <img class="brand-logo" id="brandLogo" alt="A2 Holding">
+    <h1>Supervision des paiements</h1>
+    <p class="sub">Accès en lecture seule</p>
+    <label for="password">Mot de passe</label>
+    <input type="password" id="password" autocomplete="current-password" autofocus>
+    <button type="submit">Se connecter</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    const BASE = window.location.pathname.replace(/\/$/, "");
+    document.getElementById("brandLogo").src = BASE + "/logo.png";
+    const form = document.getElementById("loginForm");
+    const err = document.getElementById("err");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      const password = document.getElementById("password").value;
+      try {
+        const res = await fetch(BASE + "/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        if (res.ok) {
+          window.location.reload();
+        } else {
+          err.textContent = "Mot de passe incorrect.";
+        }
+      } catch (_) {
+        err.textContent = "Erreur réseau.";
+      }
+    });
+  </script>
+</body>
+</html>

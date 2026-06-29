@@ -48,6 +48,33 @@ class StepResult:
         self.completed_steps: list[str] = []
 
 
+def _macs_to_unblock(job: Job) -> list[str]:
+    """MAC effectifs à débloquer pour ce job.
+
+    Utilise ``job.unblock_macs`` (calculé par le webhook, multi-abonnements).
+    Repli sur ``job.client.mac_address`` pour les jobs sérialisés avant l'ajout
+    du champ (liste vide mais ``should_unblock`` vrai). Filtre les MAC vides et
+    les placeholders ``pending-XXXX`` (client pas encore provisionné MikroTik),
+    et déduplique en conservant l'ordre.
+    """
+    candidates = list(job.unblock_macs)
+    if not candidates and job.client.mac_address:
+        candidates = [job.client.mac_address]
+
+    seen: set[str] = set()
+    macs: list[str] = []
+    for mac in candidates:
+        mac = (mac or "").strip()
+        if not mac or mac.lower().startswith("pending-"):
+            continue
+        key = mac.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        macs.append(mac)
+    return macs
+
+
 def _build_message_body(job: Job) -> str:
     """Construit le message WhatsApp envoyé au client après traitement.
 
@@ -69,12 +96,21 @@ def _build_message_body(job: Job) -> str:
     if credit > 0:
         lines.append(f"Avoir         : {credit} MRU")
 
+    n_unblocked = len(_macs_to_unblock(job)) if job.payment.should_unblock else 0
     if job.payment.should_unblock:
-        header = "✅ Paiement reçu, votre connexion est réactivée."
+        if n_unblocked > 1:
+            header = f"✅ Paiement reçu, {n_unblocked} abonnements réactivés."
+        else:
+            header = "✅ Paiement reçu, votre connexion est réactivée."
         footer = "Merci !"
     elif job.client.current_status == "active":
         header = "✅ Paiement reçu, merci."
         footer = "Votre compte est à jour."
+    elif remaining == 0:
+        # Solde réglé en totalité : ne jamais afficher « incomplet »,
+        # même si le déblocage n'a pas eu lieu / le statut n'est pas encore actif.
+        header = "✅ Paiement reçu, montant réglé en totalité."
+        footer = "Merci !"
     else:
         header = "⚠ Paiement enregistré mais incomplet."
         footer = "Merci de compléter pour réactiver votre connexion."
@@ -148,6 +184,11 @@ async def process_job(
         on_step_done(STEP_INSERTED_DB)
         result.completed_steps.append(STEP_INSERTED_DB)
 
+    # MAC des abonnements à débloquer. Un paiement peut couvrir plusieurs abos
+    # (services UCRM) → le webhook a calculé la liste `unblock_macs`. Repli sur
+    # `client.mac_address` pour les jobs au schéma antérieur (liste absente).
+    macs_to_unblock = _macs_to_unblock(job)
+
     if not _should_skip(STEP_UNBLOCKED, last_step_done):
         if not job.payment.should_unblock:
             logger.info(
@@ -157,26 +198,28 @@ async def process_job(
                 job.payment.crm_balance_before - job.payment.amount_mru,
                 job.client.id,
             )
+        elif not macs_to_unblock:
+            logger.warning("aucune mac_address valide dans le job (client=%d "
+                           "unblock_macs=%r mac=%r) — skip unblock",
+                           job.client.id, job.unblock_macs, job.client.mac_address)
         else:
-            mac = job.client.mac_address
-            # Le préfixe `pending-` est un placeholder posé par le sync UCRM
-            # pour les clients pas encore provisionnés côté MikroTik
-            # (cf. scripts/sync_clients_from_ucrm.py). Pas de règle à supprimer.
-            if mac and not mac.startswith("pending-"):
+            for mac in macs_to_unblock:
                 removed = await mikrotik.unblock_by_mac(mac)
                 logger.info("MikroTik unblock: client=%d mac=%s rules_removed=%d",
                             job.client.id, mac, removed)
-            else:
-                logger.warning("pas de mac_address valide dans le job (client=%d "
-                               "mac=%r ip=%s) — skip unblock",
-                               job.client.id, mac, job.client.ip_address)
         on_step_done(STEP_UNBLOCKED)
         result.completed_steps.append(STEP_UNBLOCKED)
 
     if not _should_skip(STEP_STATUS_ACTIVE, last_step_done):
-        if job.payment.should_unblock:
-            pg.update_client_status(job.client.id, statu=0)
-            logger.info("Statut client %d → actif", job.client.id)
+        if job.payment.should_unblock and macs_to_unblock:
+            # Statut PAR MAC : on ne passe à `actif` que les abonnements
+            # réellement débloqués. Les abos non couverts par le paiement
+            # restent suspendus (statu=2) — c'est le correctif clé : on ne
+            # marque plus tout le compte actif quand un seul abo est payé.
+            for mac in macs_to_unblock:
+                rows = pg.update_client_status_by_mac(mac, statu=0)
+                logger.info("Statut abo mac=%s → actif (lignes=%d, client=%d)",
+                            mac, rows, job.client.id)
         else:
             logger.info("Statut client %d inchangé (sous-paiement)", job.client.id)
         on_step_done(STEP_STATUS_ACTIVE)

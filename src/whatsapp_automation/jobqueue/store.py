@@ -73,18 +73,57 @@ def is_txn_in_flight(txn_id: str) -> bool:
         return cur.fetchone() is not None
 
 
-def enqueue(job: Job) -> int:
-    """Insère un job en queue. Retourne l'id interne."""
+def enqueue(job: Job) -> Optional[int]:
+    """Insère un job en queue de façon atomique avec dédup par txn_id.
+
+    Retourne l'id interne sur succès, ou None si un job avec le même txn_id
+    est déjà traité (processed_payments) ou déjà en queue (pending/processing/
+    retry). La déduplication est faite dans une BEGIN IMMEDIATE pour fermer la
+    fenêtre TOCTOU entre les check `is_txn_*` du pipeline et l'INSERT — sinon
+    plusieurs webhooks UltraMsg du même reçu reçus en parallèle peuvent tous
+    passer le check avant qu'aucun n'ait inséré, et on crée N paiements UCRM
+    pour le même txn_id."""
     now = time.time()
     payload = job.model_dump_json()
+    txn_id = job.payment.txn_id or ""
     with _connect() as conn:
-        cur = conn.execute(
-            """INSERT INTO jobs
-               (job_id, txn_id, payload_json, status, next_attempt_at, created_at)
-               VALUES (?, ?, ?, 'pending', ?, ?)""",
-            (job.job_id, job.payment.txn_id, payload, now, now),
-        )
-        return cur.lastrowid
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if txn_id:
+                cur = conn.execute(
+                    "SELECT 1 FROM processed_payments WHERE txn_id = ?",
+                    (txn_id,),
+                )
+                if cur.fetchone() is not None:
+                    conn.execute("COMMIT")
+                    return None
+                cur = conn.execute(
+                    """SELECT 1 FROM jobs
+                       WHERE txn_id = ? AND status IN ('pending', 'processing', 'retry')""",
+                    (txn_id,),
+                )
+                if cur.fetchone() is not None:
+                    conn.execute("COMMIT")
+                    return None
+            try:
+                cur = conn.execute(
+                    """INSERT INTO jobs
+                       (job_id, txn_id, payload_json, status, next_attempt_at, created_at)
+                       VALUES (?, ?, ?, 'pending', ?, ?)""",
+                    (job.job_id, txn_id, payload, now, now),
+                )
+            except sqlite3.IntegrityError:
+                # Filet de sécurité : si l'index UNIQUE partiel sur txn_id a
+                # détecté un doublon (théoriquement impossible vu les checks
+                # ci-dessus dans la même transaction, mais on garde la garantie
+                # niveau schéma).
+                conn.execute("ROLLBACK")
+                return None
+            conn.execute("COMMIT")
+            return cur.lastrowid
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
 
 def claim_next(worker_id: str) -> Optional[dict]:
@@ -200,6 +239,29 @@ def mark_failed(job_internal_id: int, error: str) -> None:
                WHERE id = ?""",
             (error, now, job_internal_id),
         )
+
+
+def get_job_by_payment_id(payment_id: str) -> Optional[Job]:
+    """Retrouve un job par son paymentId UCRM.
+
+    Utilisé par le dashboard pour reconstituer EXACTEMENT le reçu envoyé au
+    client (le payload contient montants, solde et statut de déblocage, qui
+    déterminent le texte du message). Retourne None si introuvable/illisible.
+    """
+    if not payment_id:
+        return None
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT payload_json FROM jobs WHERE ucrm_payment_id = ? ORDER BY id DESC LIMIT 1",
+            (str(payment_id),),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    try:
+        return Job.model_validate_json(row["payload_json"])
+    except Exception:
+        return None
 
 
 def stats() -> dict:

@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Supervision paiements</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    /* Palette A2 Holding (a2holding.mr) : blanc + bleu. */
+    :root {
+      --bg: #fafbfc; --card: #ffffff; --text: #31404a; --muted: #8b93a0;
+      --border: #dde1e4; --border-soft: #eaeef2;
+      --blue: #516ca9; --navy: #273564; --blue-tint: #eef1f8;
+      --coral: #ff6347; --coral-dark: #cc3a1a; --pink: #f16583;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+           background: var(--bg); color: var(--text); border-top: 4px solid var(--blue); }
+    header { display: flex; align-items: center; justify-content: space-between;
+             padding: 16px 24px; background: var(--card); border-bottom: 1px solid var(--border);
+             box-shadow: 0 1px 3px rgba(39,53,100,.05); }
+    header h1 { font-size: 18px; margin: 0; color: var(--navy); }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-logo { height: 34px; width: auto; display: block; }
+    .brand h1 { padding-left: 14px; border-left: 1px solid var(--border); }
+    header .right { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+    select, button { background: var(--card); color: var(--text); border: 1px solid var(--border);
+                     border-radius: 8px; padding: 7px 10px; font-size: 13px; cursor: pointer; }
+    select:hover, button:hover { border-color: var(--blue); }
+    select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+    a.logout { color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 600; }
+    main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+    .section-title { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .06em; margin: 4px 2px 12px; }
+    .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+    .kpi { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+           box-shadow: 0 1px 2px rgba(39,53,100,.04); transition: border-color .15s, box-shadow .15s, transform .05s; }
+    .kpi.clickable { cursor: pointer; }
+    .kpi.clickable:hover { border-color: var(--blue); box-shadow: 0 3px 10px rgba(81,108,169,.14); }
+    .kpi.clickable:active { transform: scale(.99); }
+    .kpi.active { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-tint) inset, 0 0 0 1px var(--blue); }
+    .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .kpi .value { font-size: 30px; font-weight: 700; margin-top: 6px; color: var(--navy); }
+    .kpi .value.green { color: var(--navy); } .kpi .value.red { color: var(--coral); }
+    .kpi .value.blue { color: var(--blue); } .kpi .value.amber { color: var(--pink); }
+    .charts { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; margin-top: 14px; }
+    .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+             box-shadow: 0 1px 2px rgba(39,53,100,.04); }
+    .panel h2 { font-size: 14px; margin: 0 0 14px; color: var(--navy); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border-soft); }
+    th { color: var(--muted); font-weight: 600; }
+    .tbl-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                flex-wrap: wrap; margin-bottom: 12px; }
+    .tbl-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    #search { min-width: 280px; padding: 7px 11px; border: 1px solid var(--border);
+              border-radius: 8px; font-size: 13px; color: var(--text); background: var(--card); }
+    #search:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+    .client-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .client-id { font-size: 17px; font-weight: 700; color: var(--navy); }
+    .client-id small { font-weight: 600; color: var(--muted); font-size: 13px; }
+    .client-stats { display: flex; gap: 22px; margin-top: 14px; flex-wrap: wrap; }
+    .client-stats .s .v { font-size: 22px; font-weight: 700; color: var(--blue); }
+    .client-stats .s .l { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .subs { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+    .sub-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text); }
+    .sub-row code { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; }
+    .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .b-refused { background: #fdebe6; color: var(--coral-dark); }
+    .b-ok { background: #eaf0fb; color: #2f4a86; }
+    .b-info { background: var(--blue-tint); color: var(--blue); }
+    .b-warn { background: #fdecf1; color: #c23d63; }
+    .muted { color: var(--muted); }
+    tr.ev-row { cursor: pointer; }
+    tr.ev-row:hover td { background: var(--blue-tint); }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(39,53,100,.38);
+                     display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+    .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+             width: min(960px, 96vw); max-height: 90vh; overflow: auto; box-shadow: 0 20px 50px rgba(39,53,100,.25); }
+    .modal-head { display: flex; align-items: center; justify-content: space-between;
+                  padding: 16px 20px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--card); }
+    .modal-head h3 { margin: 0; font-size: 15px; color: var(--navy); }
+    .modal-head button { background: transparent; border: 0; color: var(--muted); font-size: 18px; cursor: pointer; }
+    .modal-body { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px; }
+    .explain { background: var(--blue-tint); border-left: 3px solid var(--blue); padding: 12px 14px;
+               border-radius: 8px; font-size: 14px; line-height: 1.5; color: var(--navy); }
+    .meta { margin-top: 12px; font-size: 13px; color: var(--text); }
+    .meta div { padding: 3px 0; }
+    .meta b { color: var(--muted); font-weight: 600; }
+    .status-box { margin-top: 14px; background: var(--bg); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 12px 14px; }
+    .status-box .t { font-size: 12px; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .04em; margin-bottom: 8px; }
+    .status-flow { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+    .status-flow .arrow { color: var(--muted); }
+    .st { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .st-act { background: #eaf0fb; color: #2f4a86; }
+    .st-susp { background: #fdebe6; color: var(--coral-dark); }
+    .modal h4 { font-size: 13px; color: var(--muted); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: .04em; }
+    table.hist { font-size: 13px; }
+    #mImageWrap img { width: 100%; border-radius: 10px; border: 1px solid var(--border); }
+    #mImageWrap .none { color: var(--muted); font-size: 13px; padding: 20px; text-align: center;
+                        border: 1px dashed var(--border); border-radius: 10px; }
+    .caption { background: var(--bg); border-radius: 8px; padding: 12px 14px; white-space: pre-wrap;
+               font-size: 13.5px; line-height: 1.55; border: 1px solid var(--border); color: var(--text); }
+    #mPdf { margin-top: 10px; }
+    #mPdf a { color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 600; }
+    #mPdf iframe { width: 100%; height: 430px; margin-top: 8px; border: 1px solid var(--border);
+                   border-radius: 10px; background: #fff; }
+    @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } .modal-body { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img class="brand-logo" id="brandLogo" alt="A2 Holding">
+      <h1>Supervision des paiements</h1>
+    </div>
+    <div class="right">
+      <span id="updated" class="muted"></span>
+      <select id="period">
+        <option value="7">7 jours</option>
+        <option value="30" selected>30 jours</option>
+        <option value="90">90 jours</option>
+      </select>
+      <a class="logout" id="logout" href="#">Déconnexion</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="section-title">Vue d'ensemble</div>
+    <div class="grid" id="kpis"></div>
+
+    <div class="section-title" style="margin-top: 24px;">Analyse</div>
+    <div class="charts">
+      <div class="panel"><h2>Paiements refusés par cause</h2><canvas id="chartRefus"></canvas></div>
+      <div class="panel"><h2>Activité par jour</h2><canvas id="chartTime"></canvas></div>
+    </div>
+
+    <div class="panel" id="clientCard" style="display:none; margin-top: 24px;"></div>
+
+    <div class="panel" style="margin-top: 24px;">
+      <div class="tbl-head">
+        <h2 style="margin:0;" id="eventsTitle">Derniers événements</h2>
+        <div class="tbl-controls">
+        <input id="search" type="search" placeholder="🔍 ID client (ex. 1712) — ou téléphone / transaction">
+        <select id="typeFilter">
+          <option value="">Tous les types</option>
+          <option value="ucrm_created">Paiement créé CRM</option>
+          <option value="message_sent">Reçu envoyé</option>
+          <option value="client_unblocked">Client débloqué</option>
+          <option value="subscription_activated">Abonnement réactivé</option>
+          <option value="refused">Paiement refusé</option>
+          <option value="client_not_found">Client introuvable</option>
+          <option value="underpayment">Sous-paiement</option>
+          <option value="support_notified">Notif support</option>
+          <option value="recipient_suspect">Destinataire suspect</option>
+        </select>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Horodatage</th><th>Type</th><th>Cause</th><th>Client</th><th>Montant</th><th>Détail</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <div class="modal-overlay" id="modal" style="display:none;">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="mTitle">Détail</h3>
+        <button id="mClose" title="Fermer">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="m-left">
+          <div class="explain" id="mExplain"></div>
+          <div class="meta" id="mMeta"></div>
+          <div id="mStatus"></div>
+          <h4>Historique des paiements du client</h4>
+          <table class="hist">
+            <thead><tr><th>Date</th><th>Montant</th><th>txn / réf</th></tr></thead>
+            <tbody id="mPayments"></tbody>
+          </table>
+        </div>
+        <div class="m-right">
+          <div id="mReceiptSection">
+            <h4>Reçu envoyé au client</h4>
+            <div id="mCaption" class="caption"></div>
+            <div id="mPdf"></div>
+          </div>
+          <div id="mCaptureSection">
+            <h4>Capture reçue du client</h4>
+            <div id="mImageWrap"></div>
+            <h4>Texte OCR brut</h4>
+            <div id="mOcr" class="muted" style="font-size:12px; white-space:pre-wrap; word-break:break-word;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const BASE = window.location.pathname.replace(/\/$/, "");
+    document.getElementById("brandLogo").src = BASE + "/logo.png";
+    let chartRefus = null, chartTime = null, refreshTimer = null;
+
+    const REASON_FR = {
+      unsupported_type: "Type non supporté", no_media: "Pas d'image",
+      subscription_form: "Fiche d'abonnement", no_extraction: "OCR sans montant",
+      no_or_invalid_amount: "Montant invalide", recipient_unknown_template: "Opérateur inconnu",
+      client_not_found: "Client introuvable", client_not_suspended: "Client non suspendu",
+      crm_unreachable: "CRM injoignable", recipient_name_mismatch: "Destinataire non reconnu",
+      recipient_name_missing: "Destinataire absent", invalid_amount: "Montant invalide",
+      overpayment_balance_too_low: "Sur-paiement (solde à jour)",
+      duplicate_processed: "Doublon (déjà traité)", duplicate_in_flight: "Doublon (en cours)",
+      duplicate_race: "Doublon (course)", inconnu: "Inconnu",
+    };
+    const TYPE_FR = {
+      ucrm_created: ["Paiement créé CRM", "b-ok"], message_sent: ["Reçu envoyé", "b-ok"],
+      client_unblocked: ["Client débloqué", "b-ok"], subscription_activated: ["Abo réactivé", "b-ok"],
+      payment_enqueued: ["Reçu validé", "b-info"], refused: ["Refusé", "b-refused"],
+      client_not_found: ["Client introuvable", "b-warn"],
+      underpayment: ["Sous-paiement", "b-warn"], support_notified: ["Notif support", "b-warn"],
+      recipient_suspect: ["Destinataire suspect", "b-warn"],
+    };
+
+    function days() { return document.getElementById("period").value; }
+
+    async function api(path) {
+      const res = await fetch(`${BASE}${path}`);
+      if (res.status === 401) { window.location.reload(); throw new Error("401"); }
+      return res.json();
+    }
+
+    // `type` (optionnel) rend la carte cliquable → filtre la table sur ce type.
+    function kpiCard(label, value, cls, type) {
+      const attrs = type ? ` class="kpi clickable" data-type="${type}"` : ` class="kpi"`;
+      return `<div${attrs}><div class="label">${label}</div>
+              <div class="value ${cls||''}">${value}</div></div>`;
+    }
+
+    async function loadSummary() {
+      const s = await api(`/api/summary?days=${days()}`);
+      const q = s.queue || {};
+      document.getElementById("kpis").innerHTML = [
+        kpiCard("Paiements créés CRM", s.ucrm_created, "green", "ucrm_created"),
+        kpiCard("Reçus envoyés", s.messages_sent, "green", "message_sent"),
+        kpiCard("Clients débloqués", s.clients_unblocked_distinct, "blue", "client_unblocked"),
+        kpiCard("Paiements refusés", s.refused_total, "red", "refused"),
+        kpiCard("Clients introuvables", s.clients_not_found, "amber", "client_not_found"),
+        kpiCard("Sous-paiements", s.underpayments, "amber", "underpayment"),
+        kpiCard("Notifs support", s.support_notified, "amber", "support_notified"),
+        kpiCard("Queue : en attente", (q.pending||0) + (q.retry||0), ""),
+        kpiCard("Queue : échecs", q.failed || 0, "red"),
+      ].join("");
+      // Garde la carte active surlignée si un filtre est posé.
+      const cur = document.getElementById("typeFilter").value;
+      document.querySelectorAll("#kpis .kpi.clickable").forEach(el => {
+        el.classList.toggle("active", el.dataset.type === cur);
+      });
+    }
+
+    async function loadRefus() {
+      const data = await api(`/api/refusals?days=${days()}`);
+      const labels = Object.keys(data).map(k => REASON_FR[k] || k);
+      const values = Object.values(data);
+      const ctx = document.getElementById("chartRefus");
+      if (chartRefus) chartRefus.destroy();
+      chartRefus = new Chart(ctx, {
+        type: "doughnut",
+        data: { labels, datasets: [{ data: values, borderWidth: 0,
+          backgroundColor: ["#516ca9","#273564","#7e93c4","#ff6347","#f16583",
+                            "#989da7","#b3c0e4","#cc3a1a","#48545c","#cbd2da","#2e3844","#dde1e4"] }] },
+        options: { plugins: { legend: { position: "right", labels: { color: "#31404a", font: { size: 11 } } } } },
+      });
+    }
+
+    async function loadTime() {
+      const t = await api(`/api/timeseries?days=${days()}`);
+      const ctx = document.getElementById("chartTime");
+      if (chartTime) chartTime.destroy();
+      chartTime = new Chart(ctx, {
+        type: "line",
+        data: { labels: t.labels, datasets: [
+          { label: "Créés CRM", data: t.ucrm_created, borderColor: "#516ca9", backgroundColor: "#516ca9", tension: .3 },
+          { label: "Refusés", data: t.refused, borderColor: "#ff6347", backgroundColor: "#ff6347", tension: .3 },
+          { label: "Reçus envoyés", data: t.messages_sent, borderColor: "#273564", backgroundColor: "#273564", tension: .3 },
+        ]},
+        options: { plugins: { legend: { labels: { color: "#31404a" } } },
+          scales: { x: { ticks: { color: "#8b93a0" }, grid: { color: "#eaeef2" } },
+                    y: { ticks: { color: "#8b93a0" }, grid: { color: "#eaeef2" }, beginAtZero: true } } },
+      });
+    }
+
+    let lastEvents = [];
+    function renderEvents(list) {
+      lastEvents = list || [];
+      document.getElementById("events").innerHTML = lastEvents.map((e, i) => {
+        const [lbl, cls] = TYPE_FR[e.type] || [e.type, "b-info"];
+        const cause = e.reason ? (REASON_FR[e.reason] || e.reason) : "";
+        const detail = e.mac || e.txn_id || e.phone || e.payment_id || "";
+        return `<tr class="ev-row" data-idx="${i}"><td class="muted">${e.ts}</td>
+          <td><span class="badge ${cls}">${lbl}</span></td>
+          <td>${cause}</td><td>${e.client_id ?? ""}</td>
+          <td>${e.amount != null ? e.amount + " MRU" : ""}</td>
+          <td class="muted">${detail}</td></tr>`;
+      }).join("") || `<tr><td colspan="6" class="muted">Aucun événement.</td></tr>`;
+    }
+
+    // Mode normal : derniers événements (période + filtre type).
+    async function loadEvents() {
+      const type = document.getElementById("typeFilter").value;
+      renderEvents(await api(`/api/events?days=${days()}&limit=150&type=${type}`));
+    }
+
+    // Recherche libre (texte non numérique) sur tout l'historique.
+    async function searchEvents(q) {
+      const type = document.getElementById("typeFilter").value;
+      document.getElementById("eventsTitle").textContent = `Résultats pour « ${q} »`;
+      renderEvents(await api(`/api/events?days=3650&limit=150&type=${type}&q=${encodeURIComponent(q)}`));
+    }
+
+    // Fiche d'un client (par ID) : infos + abonnements + tous ses événements.
+    async function loadClient(id) {
+      const card = document.getElementById("clientCard");
+      card.style.display = "";
+      document.getElementById("eventsTitle").textContent = `Événements du client ${id}`;
+      const d = await api(`/api/client?id=${encodeURIComponent(id)}`);
+      if (!d.found) {
+        card.innerHTML = `<div class="muted">Aucun client ni activité pour l'ID <b>${id}</b>.</div>`;
+        renderEvents([]); return;
+      }
+      const c = d.client;
+      const big = s => s === "active" ? `<span class="st st-act">Actif</span>`
+                     : s === "suspended" ? `<span class="st st-susp">Suspendu</span>` : "";
+      const small = s => s === 0 ? `<span class="st st-act">Actif</span>`
+                       : s === 2 ? `<span class="st st-susp">Suspendu</span>` : "";
+      const subs = (c.subscriptions || []).map(s => `<div class="sub-row">
+          <code>${s.mac || "—"}</code> ${small(s.statu)}
+          ${s.ip ? `<span class="muted">${s.ip}</span>` : ""}</div>`).join("");
+      card.innerHTML = `
+        <div class="client-head">
+          <div class="client-id">Client ${c.id} ${big(c.status)}
+            <br><small>${c.name || "Nom inconnu"}${c.phone ? " · " + c.phone : ""}</small></div>
+        </div>
+        <div class="client-stats">
+          <div class="s"><div class="v">${c.payments_count}</div><div class="l">Paiements</div></div>
+          <div class="s"><div class="v">${c.total_paid} MRU</div><div class="l">Total payé</div></div>
+          <div class="s"><div class="v">${(c.subscriptions || []).length}</div><div class="l">Abonnements</div></div>
+        </div>
+        ${subs ? `<div class="subs">${subs}</div>` : ""}`;
+      renderEvents(d.events);
+    }
+
+    // Aiguille selon la saisie : vide → normal ; chiffres → fiche client ; sinon → recherche texte.
+    async function runSearch() {
+      const v = document.getElementById("search").value.trim();
+      const card = document.getElementById("clientCard");
+      if (!v) {
+        card.style.display = "none";
+        document.getElementById("eventsTitle").textContent = "Derniers événements";
+        await loadEvents();
+      } else if (/^\d+$/.test(v)) {
+        await loadClient(v);
+      } else {
+        card.style.display = "none";
+        await searchEvents(v);
+      }
+    }
+
+    // Texte d'explication du refus (ou de l'événement) en français.
+    function explain(ev) {
+      const a = ev.amount, b = ev.balance, t = ev.txn_id;
+      switch (ev.reason) {
+        case "overpayment_balance_too_low":
+          return `Sur-paiement refusé : le client devait ${b} MRU et a payé ${a} MRU. `
+               + `Le solde restant à régler (${b} MRU) étant trop faible, ce reçu est `
+               + `considéré comme déjà utilisé ou envoyé par erreur — d'où le refus.`;
+        case "duplicate_processed":
+          return `Doublon : ce reçu (txn ${t}) a déjà été traité avec succès auparavant.`;
+        case "duplicate_in_flight":
+          return `Doublon : un reçu identique (txn ${t}) est déjà en cours de traitement.`;
+        case "duplicate_race":
+          return `Doublon détecté au dernier moment : deux copies du même reçu reçues en parallèle.`;
+        case "crm_unreachable":
+          return `Le CRM était injoignable : impossible de vérifier le solde, le paiement n'a pas été validé.`;
+        case "client_not_found":
+          return `Numéro non rattaché à un client dans la base — impossible d'imputer le paiement.`;
+        case "no_media": return `Message sans image : aucun reçu à analyser.`;
+        case "unsupported_type": return `Message non-image (vidéo, sticker, audio…) : ce n'est pas un reçu.`;
+        case "no_extraction": return `L'OCR n'a rien pu extraire d'exploitable de l'image.`;
+        case "no_or_invalid_amount": return `Aucun montant valide n'a pu être lu sur le reçu.`;
+        case "subscription_form": return `Document = fiche « Nouvel abonnement », pas un reçu de paiement.`;
+        case "recipient_name_mismatch":
+          return `Le destinataire attendu (PATRINET / A2 CONNECT / PATRIE NET) n'apparaît pas sur le reçu.`;
+        default: return ev.reason ? `Motif : ${ev.reason}` : "Détail de l'événement.";
+      }
+    }
+
+    async function openDetail(ev) {
+      const [lbl] = TYPE_FR[ev.type] || [ev.type];
+      document.getElementById("mTitle").textContent = `${lbl} — ${ev.ts}`;
+      document.getElementById("mExplain").textContent = explain(ev);
+      const rows = [
+        ev.client_id != null ? `<div><b>Client :</b> ${ev.client_id}</div>` : "",
+        ev.phone ? `<div><b>Téléphone :</b> ${ev.phone}</div>` : "",
+        ev.amount != null ? `<div><b>Montant payé :</b> ${ev.amount} MRU</div>` : "",
+        ev.balance != null ? `<div><b>Solde dû (CRM) :</b> ${ev.balance} MRU</div>` : "",
+        ev.txn_id ? `<div><b>Transaction :</b> ${ev.txn_id}</div>` : "",
+        ev.operator ? `<div><b>Opérateur :</b> ${ev.operator}</div>` : "",
+      ].join("");
+      document.getElementById("mMeta").innerHTML = rows;
+      document.getElementById("mImageWrap").innerHTML = `<div class="none">Chargement…</div>`;
+      document.getElementById("mPayments").innerHTML = "";
+      document.getElementById("mOcr").textContent = "";
+      document.getElementById("mCaption").textContent = "";
+      document.getElementById("mPdf").innerHTML = "";
+      document.getElementById("mStatus").innerHTML = "";
+      // Sections affichées selon le type : reçu envoyé vs capture reçue.
+      const isSent = ev.type === "message_sent";
+      document.getElementById("mReceiptSection").style.display = isSent ? "" : "none";
+      document.getElementById("mCaptureSection").style.display = isSent ? "none" : "";
+      document.getElementById("modal").style.display = "flex";
+
+      const qs = new URLSearchParams({
+        txn_id: ev.txn_id || "", client_id: ev.client_id || 0,
+        date: ev.date || "", payment_id: ev.payment_id || "", phone: ev.phone || "",
+        amount: ev.amount != null ? ev.amount : "",
+      });
+      let d;
+      try { d = await api(`/api/event_detail?${qs}`); }
+      catch (_) { return; }
+
+      // Statut du client avant → après le paiement (si reconstituable).
+      const stEl = document.getElementById("mStatus");
+      if (d.receipt && d.receipt.found && d.receipt.status_before) {
+        const stBadge = s => s === "active"
+          ? `<span class="st st-act">Actif</span>`
+          : `<span class="st st-susp">Suspendu</span>`;
+        const b = d.receipt.status_before, a = d.receipt.status_after;
+        const note = (b !== a) ? " (réactivé par ce paiement)"
+                   : (a === "active" ? " (déjà actif)" : " (toujours suspendu — paiement partiel)");
+        stEl.innerHTML = `<div class="status-box"><div class="t">Statut du client</div>
+          <div class="status-flow">${stBadge(b)}<span class="arrow">→</span>${stBadge(a)}
+          <span class="muted" style="font-size:12px;">${note}</span></div></div>`;
+      }
+
+      // Reçu ENVOYÉ au client (message_sent).
+      const rec = d.receipt;
+      if (rec) {
+        document.getElementById("mReceiptSection").style.display = "";
+        document.getElementById("mCaption").textContent =
+          rec.caption || "Texte du message non disponible (job purgé de la file).";
+        if (rec.pdf_url) {
+          document.getElementById("mPdf").innerHTML =
+            `<a href="${rec.pdf_url}" target="_blank">📄 Ouvrir le reçu PDF (id ${rec.payment_id})</a>
+             <iframe src="${rec.pdf_url}" title="reçu PDF"></iframe>`;
+        }
+      }
+
+      // Capture REÇUE du client (refus / autres avec txn).
+      if (d.sample && d.sample.found) {
+        document.getElementById("mCaptureSection").style.display = "";
+        const src = `${BASE}/api/sample_image?date=${d.sample.date}&sid=${d.sample.sid}`;
+        document.getElementById("mImageWrap").innerHTML =
+          `<a href="${src}" target="_blank"><img src="${src}" alt="capture"></a>`;
+        document.getElementById("mOcr").textContent = d.sample.raw_text || "—";
+      } else if (!isSent) {
+        document.getElementById("mImageWrap").innerHTML =
+          `<div class="none">Capture non disponible${ev.txn_id ? "" : " (pas de transaction associée)"}.</div>`;
+      }
+
+      const pays = d.payments || [];
+      document.getElementById("mPayments").innerHTML = pays.length
+        ? pays.map(p => `<tr><td class="muted">${p.date}</td>
+            <td>${p.amount} MRU</td><td class="muted">${p.txn_id || p.id_payment || ""}</td></tr>`).join("")
+        : `<tr><td colspan="3" class="muted">Aucun paiement enregistré pour ce client.</td></tr>`;
+    }
+
+    function closeModal() { document.getElementById("modal").style.display = "none"; }
+    document.getElementById("events").addEventListener("click", (e) => {
+      const tr = e.target.closest("tr.ev-row");
+      if (tr) openDetail(lastEvents[+tr.dataset.idx]);
+    });
+    document.getElementById("mClose").addEventListener("click", closeModal);
+    document.getElementById("modal").addEventListener("click", (e) => {
+      if (e.target.id === "modal") closeModal();
+    });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+    async function refreshAll() {
+      try {
+        await Promise.all([loadSummary(), loadRefus(), loadTime(), runSearch()]);
+        document.getElementById("updated").textContent =
+          "Mis à jour " + new Date().toLocaleTimeString("fr-FR");
+      } catch (_) { /* 401 gère le reload */ }
+    }
+
+    function highlightCards() {
+      const cur = document.getElementById("typeFilter").value;
+      document.querySelectorAll("#kpis .kpi.clickable").forEach(el => {
+        el.classList.toggle("active", el.dataset.type === cur);
+      });
+    }
+
+    // Clic sur une carte KPI → filtre la table sur ce type et y défile.
+    document.getElementById("kpis").addEventListener("click", (e) => {
+      const card = e.target.closest(".kpi.clickable");
+      if (!card) return;
+      const type = card.dataset.type;
+      const filter = document.getElementById("typeFilter");
+      document.getElementById("search").value = "";  // sortir d'une éventuelle recherche
+      // Re-clic sur la carte déjà active → on retire le filtre.
+      filter.value = (filter.value === type) ? "" : type;
+      highlightCards();
+      runSearch();
+      document.querySelector("table").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+
+    document.getElementById("period").addEventListener("change", refreshAll);
+    document.getElementById("typeFilter").addEventListener("change", () => { highlightCards(); runSearch(); });
+    // Recherche : debounce 300 ms pour ne pas requêter à chaque frappe.
+    let searchTimer = null;
+    document.getElementById("search").addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(runSearch, 300);
+    });
+    document.getElementById("logout").addEventListener("click", async (e) => {
+      e.preventDefault();
+      await fetch(`${BASE}/logout`);
+      window.location.reload();
+    });
+
+    refreshAll();
+    refreshTimer = setInterval(refreshAll, 30000);
+  </script>
+</body>
+</html>

@@ -60,6 +60,49 @@ def get_client_by_phone(phone: str) -> Optional[dict]:
         return row
 
 
+def get_client_by_id(idclient: int | str) -> list[dict]:
+    """Retourne toutes les lignes `client` d'un idclient (1 par abonnement/MAC).
+
+    `client.idclient` est VARCHAR(250) en prod (contenu entier) ; on filtre en
+    str et on recaste en int en sortie, comme get_client_by_phone.
+    """
+    with connection() as conn:
+        cur = conn.execute(
+            """SELECT idclient, info, mac, statu, ipaddress
+               FROM client
+               WHERE idclient = %s""",
+            (str(idclient),),
+        )
+        rows = cur.fetchall()
+    for row in rows:
+        row["idclient"] = int(row["idclient"])
+    return list(rows)
+
+
+def get_clients_by_phone(phone: str) -> list[dict]:
+    """Retourne TOUTES les lignes `client` matchant le téléphone.
+
+    Contrairement à ``get_client_by_phone`` (qui prend la 1re ligne, pour le
+    pipeline de paiement), un même client peut avoir plusieurs abonnements /
+    équipements en prod : autant de lignes que de MAC distincts, partageant en
+    général le même ``idclient``. Cet endpoint de consultation a besoin de
+    toutes ces lignes pour exposer le MAC de chaque abonnement.
+    """
+    if not phone:
+        return []
+    with connection() as conn:
+        cur = conn.execute(
+            """SELECT idclient, info, mac, statu, ipaddress
+               FROM client
+               WHERE info LIKE %s""",
+            (f"%{phone}%",),
+        )
+        rows = cur.fetchall()
+    for row in rows:
+        row["idclient"] = int(row["idclient"])
+    return list(rows)
+
+
 def insert_paiement(
     idclient: int,
     amount: int,
@@ -103,6 +146,75 @@ def update_client_status(idclient: int | str, statu: int) -> None:
             "UPDATE client SET statu = %s WHERE idclient = %s",
             (statu, str(idclient)),
         )
+
+
+def update_client_status_by_mac(mac: str, statu: int) -> int:
+    """Met à jour `statu` pour la ligne client portant ce MAC précis.
+
+    Contrairement à ``update_client_status`` (qui agit sur toutes les lignes
+    d'un idclient), on cible un seul abonnement par sa MAC — cohérent avec le
+    blocage/déblocage d'un équipement unique (cf. PHP ``EditStatuClient`` qui
+    filtre aussi par MAC). Retourne le nombre de lignes modifiées.
+    """
+    if not mac:
+        return 0
+    with connection() as conn:
+        cur = conn.execute(
+            "UPDATE client SET statu = %s WHERE mac = %s",
+            (statu, mac),
+        )
+        return cur.rowcount
+
+
+def count_paiements() -> int:
+    """Nombre total de paiements enregistrés (table `paiment`).
+
+    Utilisé par le dashboard de supervision comme repère cumulatif. La table
+    n'a pas de timestamp complet (jour/mois/année séparés) : on renvoie le total
+    brut, les compteurs par période venant des logs.
+    """
+    with connection() as conn:
+        cur = conn.execute("SELECT COUNT(*) AS n FROM paiment")
+        row = cur.fetchone()
+        return int(row["n"]) if row else 0
+
+
+def get_paiements_by_client(idclient: int, limit: int = 20) -> list[dict]:
+    """Historique des paiements ENREGISTRÉS d'un client (table `paiment`).
+
+    Utilisé par le détail d'un événement du dashboard (ex : montrer les
+    paiements précédents d'un client dont un nouveau reçu est refusé pour
+    sur-paiement). Trié du plus récent au plus ancien. La table n'a pas de
+    timestamp complet : on ordonne sur year/month/day puis id_payment.
+    """
+    with connection() as conn:
+        cur = conn.execute(
+            """SELECT id_payment, amount, day, month, year, txn_id, phone
+               FROM paiment
+               WHERE idclient = %s
+               ORDER BY year DESC, month DESC, day DESC, id_payment DESC
+               LIMIT %s""",
+            (idclient, limit),
+        )
+        return list(cur.fetchall())
+
+
+def get_paiements_by_phone(phone: str, limit: int = 20) -> list[dict]:
+    """Historique des paiements d'un client par TÉLÉPHONE (repli quand on ne
+    connaît pas l'idclient, ex : reçu envoyé dont le log ne porte que le numéro).
+    """
+    if not phone:
+        return []
+    with connection() as conn:
+        cur = conn.execute(
+            """SELECT id_payment, idclient, amount, day, month, year, txn_id, phone
+               FROM paiment
+               WHERE phone = %s
+               ORDER BY year DESC, month DESC, day DESC, id_payment DESC
+               LIMIT %s""",
+            (phone, limit),
+        )
+        return list(cur.fetchall())
 
 
 def payment_exists_by_txn(txn_id: str) -> bool:

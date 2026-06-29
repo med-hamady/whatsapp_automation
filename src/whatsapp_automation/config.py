@@ -53,6 +53,13 @@ ULTRAMSG_BASE_URL = _get("ULTRAMSG_BASE_URL", "http://127.0.0.1:9003")
 ULTRAMSG_INSTANCE = _get("ULTRAMSG_INSTANCE", "instance62746")
 ULTRAMSG_TOKEN = _get("ULTRAMSG_TOKEN", "fake-token")
 
+# Destinataire WhatsApp qui reçoit les notifications d'échec de paiement
+# (client introuvable, OCR raté, CRM injoignable, sur-paiement…). Accepte :
+#   - un numéro individuel : "+22248783201"
+#   - un ID de groupe :     "120363xxxxxxxxxxxx@g.us"
+# Si vide, les notifs sont skippées silencieusement (avec un warning).
+SUPPORT_RECIPIENT = _get("SUPPORT_RECIPIENT", "")
+
 AI_OCR_URL = _get("AI_OCR_URL", "http://127.0.0.1:8008")
 
 # Racine projet = parent de src/whatsapp_automation/
@@ -62,6 +69,14 @@ _DATA_DIR = _PROJECT_ROOT / "data"
 QUEUE_DB_PATH = _get(
     "QUEUE_DB_PATH",
     str(_DATA_DIR / "queue.db"),
+)
+
+# Base SQLite dédiée du dashboard : cache d'événements alimenté depuis les logs
+# (les logs restent la source brute, intouchée). Le dashboard lit cette table au
+# lieu de parser les logs à chaque requête.
+EVENTS_DB_PATH = _get(
+    "EVENTS_DB_PATH",
+    str(_DATA_DIR / "events.db"),
 )
 
 # Dossier où le service ai_ocr archive les samples (images + OCR + label.json)
@@ -78,7 +93,23 @@ PDF_URL_TEMPLATE = _get(
     "http://127.0.0.1:9003/fake-pdf/{payment_id}",
 )
 
+# Clé d'API pour l'endpoint interne /api/clients/lookup (consultation client).
+# Vide = endpoint désactivé (toute requête → 401), c'est le comportement par
+# défaut tant qu'un opérateur n'a pas explicitement configuré une valeur.
+CLIENT_API_KEY = _get("CLIENT_API_KEY", "")
+
+# Clé d'API séparée pour les actions sensibles (/api/clients/block : blocage /
+# déblocage d'un client sur le routeur). Distincte de CLIENT_API_KEY pour que la
+# clé de lecture seule ne permette pas d'agir sur le réseau. Vide = endpoint
+# désactivé (toute requête → 401).
+ADMIN_API_KEY = _get("ADMIN_API_KEY", "")
+
 # Tolérance de sous-paiement (MRU). Si (solde CRM - montant payé) > seuil,
 # on enregistre le paiement mais on ne débloque pas le client.
 # Si ≤ seuil (y compris valeur négative = sur-paiement), on débloque.
 UNDERPAYMENT_TOLERANCE = int(_get("UNDERPAYMENT_TOLERANCE", "150"))
+
+# Mot de passe d'accès au dashboard de supervision (/dashboard). Lecture seule.
+# Vide = dashboard désactivé : la page de login refuse toute connexion et les
+# endpoints /dashboard/api/* renvoient 401. À renseigner en prod via .env.
+DASHBOARD_PASSWORD = _get("DASHBOARD_PASSWORD", "")

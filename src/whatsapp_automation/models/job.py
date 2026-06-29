@@ -44,3 +44,10 @@ class Job(BaseModel):
     client: Client
     payment: Payment
     source: Source
+
+    # MAC des abonnements à débloquer pour ce paiement. Un client peut payer
+    # plusieurs abonnements (services UCRM) en un seul versement : on débloque
+    # alors chaque abonnement couvert par le montant (cf. validators.plan_unblocks).
+    # Défaut vide → les jobs déjà en queue (schéma antérieur) restent valides ;
+    # le worker retombe alors sur `client.mac_address` si `should_unblock`.
+    unblock_macs: list[str] = Field(default_factory=list)

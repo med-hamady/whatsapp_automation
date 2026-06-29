@@ -75,6 +75,60 @@ def _name_in_text(name: str, text_compact: str) -> bool:
     return False
 
 
+# Marqueurs (compactés : majuscules sans espace/ponctuation) propres aux
+# fiches "NOUVEL ABONNEMENT" de Connect A2. Ce sont des formulaires
+# d'inscription d'un nouveau client (nom, adresse, forfait, date
+# d'installation, signature) — PAS des reçus de paiement. Un client les
+# envoie parfois par erreur sur le même canal WhatsApp.
+#
+# On exige au moins DEUX marqueurs distincts pour conclure : un vrai reçu de
+# paiement ne contient quasi jamais deux de ces libellés à la fois, alors que
+# la fiche en contient une dizaine. Cela évite les faux positifs (un message
+# de paiement qui mentionnerait au passage "abonnement").
+_SUBSCRIPTION_FORM_MARKERS: tuple[str, ...] = (
+    "NOUVELABONNEMENT",       # titre de la fiche
+    "FORFAITPACKAGE",         # "Forfait / Package"
+    "AIRFIBER",               # noms de forfaits (AirFiber Familial/Pro/Turbo…)
+    "DATEDINSTALLATION",      # "Date d'installation"
+    "SERVICEDISTRIBUTION",    # case de signature
+    "RAISONSOCIALE",          # "Nom ou raison sociale"
+    "IDENTIFICATIONDUCLIENT", # en-tête
+    "NOMBRESDETAGES",         # "Nombres d'étages de la propriété"
+    "إشتراكجديد",             # "Nouvel abonnement" en arabe
+)
+_SUBSCRIPTION_FORM_MIN_HITS = 2
+
+
+def validate_document_type(
+    raw_text: Optional[str], template: Optional[str] = None
+) -> ValidationResult:
+    """Écarte les documents qui ne sont pas des reçus de paiement.
+
+    Aujourd'hui un seul type parasite est connu : la fiche "NOUVEL
+    ABONNEMENT" de Connect A2.
+
+    Deux signaux, dans l'ordre :
+    1. ``template == "subscription_form"`` : la couche OCR a déjà classé le
+       document (cf. ai_ocr.extractors.subscription_form). C'est la source de
+       vérité quand le service OCR est à jour.
+    2. Sinon, repli défensif : on scanne ``raw_text`` et on rejette si au
+       moins ``_SUBSCRIPTION_FORM_MIN_HITS`` marqueurs distincts apparaissent
+       (utile si l'OCR n'a pas encore été redéployé).
+
+    Retourne ``ok=False, reason="subscription_form"`` si c'est une fiche
+    d'abonnement, ``ok=True`` sinon (y compris si ``raw_text`` est vide).
+    """
+    if template == "subscription_form":
+        return ValidationResult(False, "subscription_form")
+    if not raw_text:
+        return ValidationResult(True)
+    text_compact = _compact(raw_text)
+    hits = sum(1 for marker in _SUBSCRIPTION_FORM_MARKERS if marker in text_compact)
+    if hits >= _SUBSCRIPTION_FORM_MIN_HITS:
+        return ValidationResult(False, "subscription_form")
+    return ValidationResult(True)
+
+
 def validate_extraction(extracted: dict) -> ValidationResult:
     """Vérifie que l'IA a extrait au moins le montant."""
     if not extracted:
@@ -156,6 +210,28 @@ def validate_crm_balance(balance: Optional[int]) -> ValidationResult:
     return ValidationResult(True)
 
 
+def validate_payment_balance(
+    amount_paid: int, crm_balance: int, threshold: int
+) -> ValidationResult:
+    """Anti sur-paiement : refuse les paiements quand il ne reste presque
+    rien à devoir.
+
+    - balance ≥ montant payé → OK (paiement normal, exact ou sous-paiement)
+    - balance < montant payé (sur-paiement) :
+      - balance ≤ threshold → refus (rien d'utile à régler, sans doute capture
+        rejouée ou erreur côté client)
+      - balance > threshold → OK (sur-paiement toléré, créera un avoir)
+
+    Le seuil est partagé avec `should_unblock_client` (UNDERPAYMENT_TOLERANCE) :
+    en dessous de cette valeur, on considère le compte déjà à jour.
+    """
+    if amount_paid <= crm_balance:
+        return ValidationResult(True)
+    if crm_balance <= threshold:
+        return ValidationResult(False, "overpayment_balance_too_low")
+    return ValidationResult(True)
+
+
 def should_unblock_client(amount_paid: int, crm_balance: int, threshold: int) -> bool:
     """Règle métier : on débloque le client si l'écart entre ce qu'il doit
     (CRM) et ce qu'il a payé est ≤ threshold.
@@ -166,3 +242,81 @@ def should_unblock_client(amount_paid: int, crm_balance: int, threshold: int) ->
     """
     underpayment = crm_balance - amount_paid
     return underpayment <= threshold
+
+
+@dataclass
+class UnblockPlan:
+    """Résultat de la répartition d'un paiement sur plusieurs abonnements.
+
+    - ``macs``          : MAC des abonnements à débloquer (entièrement couverts,
+                          + au plus un abo marginal couvert via la tolérance).
+    - ``covered_count`` : nombre d'abonnements débloqués.
+    - ``total_due``     : somme des prix des abonnements suspendus considérés.
+    - ``remainder``     : montant disponible non consommé (→ reste en crédit).
+    """
+    macs: list[str]
+    covered_count: int
+    total_due: int
+    remainder: int
+
+
+def plan_unblocks(
+    suspended_services: list[dict],
+    available: int,
+    threshold: int,
+) -> UnblockPlan:
+    """Répartit ``available`` (montant payé + crédit existant) sur les
+    abonnements suspendus et renvoie les MAC à débloquer.
+
+    Règle :
+    - On ne considère que les abonnements ayant un MAC exploitable et un prix
+      strictement positif (les ``pending-XXXX`` et MAC vides sont ignorés).
+    - Les abonnements sont triés par **prix croissant** : on débloque ainsi le
+      maximum d'abonnements quand le paiement est partiel (plus favorable au
+      client qui a payé pour plusieurs abos).
+    - Chaque abonnement entièrement couvert est débloqué (``available`` déduit).
+    - L'abonnement marginal (manque ≤ ``threshold``) est couvert **une seule
+      fois** grâce à la tolérance, puis on s'arrête. Cela préserve le
+      comportement historique (payer 1490 pour un abo à 1500 débloque).
+    - Le reliquat (``remainder``) reste disponible en crédit.
+
+    ``suspended_services`` : ``[{"mac": str, "price": int|float}, ...]``.
+    """
+    items: list[tuple[int, str]] = []
+    for svc in suspended_services:
+        mac = (svc.get("mac") or "").strip()
+        if not mac or mac.lower().startswith("pending-"):
+            continue
+        try:
+            price = int(round(float(svc.get("price"))))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        items.append((price, mac))
+
+    items.sort(key=lambda it: it[0])
+    total_due = sum(price for price, _ in items)
+
+    macs: list[str] = []
+    remaining = available
+    tolerance_used = False
+    for price, mac in items:
+        if remaining >= price:
+            macs.append(mac)
+            remaining -= price
+        elif not tolerance_used and (price - remaining) <= threshold:
+            # Abo marginal couvert grâce à la tolérance (consommée une seule fois).
+            macs.append(mac)
+            remaining = 0
+            tolerance_used = True
+            break
+        else:
+            break
+
+    return UnblockPlan(
+        macs=macs,
+        covered_count=len(macs),
+        total_due=total_due,
+        remainder=max(0, remaining),
+    )

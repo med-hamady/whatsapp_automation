@@ -5,7 +5,15 @@
       "Bash(Get-ChildItem -Path \"D:\\\\Whatsapp\" -Force)",
       "Bash(Select-Object Name, PSIsContainer)",
       "Bash(mkdir -p \"d:\\\\Whatsapp\\\\.claude\")",
-      "Bash(mv \"d:\\\\Whatsapp\\\\AUDIT_webhook.md\" \"d:\\\\Whatsapp\\\\.claude\\\\AUDIT_webhook.md\")"
+      "Bash(mv \"d:\\\\Whatsapp\\\\AUDIT_webhook.md\" \"d:\\\\Whatsapp\\\\.claude\\\\AUDIT_webhook.md\")",
+      "Bash(python -c ' *)",
+      "Bash(python scripts/backfill_payments.py --since 2026-05-13 --until 2026-06-01)",
+      "Bash(python scripts/backfill_payments.py --since 2026-05-13 --until 2026-06-01 --apply)",
+      "Bash(chcp 65001)",
+      "Bash(python scripts/sync_clients_from_ucrm.py 1816 1822 1503 1823 1827)",
+      "Bash(python scripts/sync_clients_from_ucrm.py 1816 1822 1503 1823 1827 --apply)",
+      "Bash(python -c \"from src.whatsapp_automation.webhook import pipeline; print\\('pipeline import OK'\\); print\\('validate_recipient_name in module:', hasattr\\(pipeline, 'validate_recipient_name'\\)\\)\")",
+      "Bash(python scripts/replay_recipient_check.py)"
     ]
   }
 }
