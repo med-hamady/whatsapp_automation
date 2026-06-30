@@ -120,24 +120,40 @@ def _since(days: Optional[int]) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _range(days: Optional[int], start: Optional[str], end: Optional[str]) -> tuple[str, str]:
+    """Borne temporelle (since, until) pour le filtrage SQL `ts BETWEEN`.
+
+    Une plage explicite (start/end, format YYYY-MM-DD) a priorité sur `days`.
+    start manquant → depuis l'origine ; end manquant → jusqu'à l'infini.
+    """
+    if start or end:
+        since = f"{start} 00:00:00" if start else "0000-00-00 00:00:00"
+        until = f"{end} 23:59:59" if end else "9999-12-31 23:59:59"
+    else:
+        since, until = _since(days), "9999-12-31 23:59:59"
+    return since, until
+
+
 # Prédicat SQL : "vrai refus comptabilisé" (type refused, hors causes exclues).
 _COUNTED_REFUSAL = f"type='refused' AND COALESCE(reason,'') NOT IN ({_EXCL_PH})"
 # Prédicat SQL : event NON masqué (on cache les refus exclus partout).
 _NOT_HIDDEN = f"NOT (type='refused' AND COALESCE(reason,'') IN ({_EXCL_PH}))"
 
 
-def summary(days: Optional[int] = 30, db_path: Optional[str] = None) -> dict:
-    since = _since(days)
+def summary(days: Optional[int] = 30, start: Optional[str] = None,
+            end: Optional[str] = None, db_path: Optional[str] = None) -> dict:
+    since, until = _range(days, start, end)
     with _connect(db_path) as conn:
         by_type = {r["type"]: r["n"] for r in conn.execute(
-            "SELECT type, COUNT(*) n FROM events WHERE ts>=? GROUP BY type", (since,))}
+            "SELECT type, COUNT(*) n FROM events WHERE ts>=? AND ts<=? GROUP BY type",
+            (since, until))}
         refused = conn.execute(
-            f"SELECT COUNT(*) n FROM events WHERE ts>=? AND {_COUNTED_REFUSAL}",
-            (since, *_EXCL)).fetchone()["n"]
+            f"SELECT COUNT(*) n FROM events WHERE ts>=? AND ts<=? AND {_COUNTED_REFUSAL}",
+            (since, until, *_EXCL)).fetchone()["n"]
         unblocked_distinct = conn.execute(
             "SELECT COUNT(DISTINCT client_id) n FROM events "
-            "WHERE ts>=? AND type='client_unblocked' AND client_id IS NOT NULL",
-            (since,)).fetchone()["n"]
+            "WHERE ts>=? AND ts<=? AND type='client_unblocked' AND client_id IS NOT NULL",
+            (since, until)).fetchone()["n"]
     return {
         "period_days": days,
         "payments_enqueued": by_type.get("payment_enqueued", 0),
@@ -154,23 +170,25 @@ def summary(days: Optional[int] = 30, db_path: Optional[str] = None) -> dict:
     }
 
 
-def refusals_by_cause(days: Optional[int] = 30, db_path: Optional[str] = None) -> dict:
-    since = _since(days)
+def refusals_by_cause(days: Optional[int] = 30, start: Optional[str] = None,
+                      end: Optional[str] = None, db_path: Optional[str] = None) -> dict:
+    since, until = _range(days, start, end)
     with _connect(db_path) as conn:
         rows = conn.execute(
             f"SELECT COALESCE(reason,'inconnu') reason, COUNT(*) n FROM events "
-            f"WHERE ts>=? AND {_COUNTED_REFUSAL} GROUP BY reason ORDER BY n DESC",
-            (since, *_EXCL)).fetchall()
+            f"WHERE ts>=? AND ts<=? AND {_COUNTED_REFUSAL} GROUP BY reason ORDER BY n DESC",
+            (since, until, *_EXCL)).fetchall()
     return {r["reason"]: r["n"] for r in rows}
 
 
-def timeseries(days: int = 30, db_path: Optional[str] = None) -> dict:
-    since = _since(days)
+def timeseries(days: int = 30, start: Optional[str] = None,
+               end: Optional[str] = None, db_path: Optional[str] = None) -> dict:
+    since, until = _range(days, start, end)
     with _connect(db_path) as conn:
         rows = conn.execute(
             f"SELECT substr(ts,1,10) d, type, COUNT(*) n FROM events "
-            f"WHERE ts>=? AND {_NOT_HIDDEN} GROUP BY d, type",
-            (since, *_EXCL)).fetchall()
+            f"WHERE ts>=? AND ts<=? AND {_NOT_HIDDEN} GROUP BY d, type",
+            (since, until, *_EXCL)).fetchall()
     buckets: dict[str, dict[str, int]] = {}
     for r in rows:
         buckets.setdefault(r["d"], {})[r["type"]] = r["n"]
@@ -190,11 +208,13 @@ def recent_events(
     type_filter: Optional[str] = None,
     days: Optional[int] = 30,
     q: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> list[dict]:
-    since = _since(days)
-    sql = f"SELECT * FROM events WHERE ts>=? AND {_NOT_HIDDEN}"
-    params: list = [since, *_EXCL]
+    since, until = _range(days, start, end)
+    sql = f"SELECT * FROM events WHERE ts>=? AND ts<=? AND {_NOT_HIDDEN}"
+    params: list = [since, until, *_EXCL]
     if type_filter:
         sql += " AND type=?"
         params.append(type_filter)

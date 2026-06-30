@@ -28,6 +28,11 @@
                      border-radius: 8px; padding: 7px 10px; font-size: 13px; cursor: pointer; }
     select:hover, button:hover { border-color: var(--blue); }
     select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+    .date-in { background: var(--card); color: var(--text); border: 1px solid var(--border);
+               border-radius: 8px; padding: 6px 8px; font-size: 13px; }
+    .date-in:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+    .dr-lbl { font-size: 12px; }
+    #resetDates { padding: 6px 9px; }
     a.logout { color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 600; }
     main { padding: 24px; max-width: 1200px; margin: 0 auto; }
     .section-title { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;
@@ -123,6 +128,11 @@
         <option value="30" selected>30 jours</option>
         <option value="90">90 jours</option>
       </select>
+      <span class="muted dr-lbl">du</span>
+      <input type="date" id="dateFrom" class="date-in" title="Date de début">
+      <span class="muted dr-lbl">au</span>
+      <input type="date" id="dateTo" class="date-in" title="Date de fin">
+      <button id="resetDates" title="Réinitialiser les dates">✕</button>
       <a class="logout" id="logout" href="#">Déconnexion</a>
     </div>
   </header>
@@ -226,6 +236,13 @@
 
     function days() { return document.getElementById("period").value; }
 
+    // Filtre temporel : plage de dates si renseignée, sinon la période choisie.
+    function timeQS() {
+      const f = document.getElementById("dateFrom").value;
+      const t = document.getElementById("dateTo").value;
+      return (f || t) ? `start=${f}&end=${t}` : `days=${days()}`;
+    }
+
     async function api(path) {
       const res = await fetch(`${BASE}${path}`);
       if (res.status === 401) { window.location.reload(); throw new Error("401"); }
@@ -240,11 +257,13 @@
     }
 
     async function loadSummary() {
-      const s = await api(`/api/summary?days=${days()}`);
+      const s = await api(`/api/summary?${timeQS()}`);
       const q = s.queue || {};
+      // Total des reçus reçus = créés CRM + refusés + clients introuvables.
+      const totalRecus = (s.ucrm_created || 0) + (s.refused_total || 0) + (s.clients_not_found || 0);
       document.getElementById("kpis").innerHTML = [
+        kpiCard("Total paiements reçus", totalRecus, "blue"),
         kpiCard("Paiements créés CRM", s.ucrm_created, "green", "ucrm_created"),
-        kpiCard("Reçus envoyés", s.messages_sent, "green", "message_sent"),
         kpiCard("Clients débloqués", s.clients_unblocked_distinct, "blue", "client_unblocked"),
         kpiCard("Paiements refusés", s.refused_total, "red", "refused"),
         kpiCard("Clients introuvables", s.clients_not_found, "amber", "client_not_found"),
@@ -261,7 +280,7 @@
     }
 
     async function loadRefus() {
-      const data = await api(`/api/refusals?days=${days()}`);
+      const data = await api(`/api/refusals?${timeQS()}`);
       const labels = Object.keys(data).map(k => REASON_FR[k] || k);
       const values = Object.values(data);
       const ctx = document.getElementById("chartRefus");
@@ -276,7 +295,7 @@
     }
 
     async function loadTime() {
-      const t = await api(`/api/timeseries?days=${days()}`);
+      const t = await api(`/api/timeseries?${timeQS()}`);
       const ctx = document.getElementById("chartTime");
       if (chartTime) chartTime.destroy();
       chartTime = new Chart(ctx, {
@@ -307,17 +326,20 @@
       }).join("") || `<tr><td colspan="6" class="muted">Aucun événement.</td></tr>`;
     }
 
-    // Mode normal : derniers événements (période + filtre type).
+    // Mode normal : derniers événements (période/plage + filtre type).
     async function loadEvents() {
       const type = document.getElementById("typeFilter").value;
-      renderEvents(await api(`/api/events?days=${days()}&limit=150&type=${type}`));
+      renderEvents(await api(`/api/events?${timeQS()}&limit=150&type=${type}`));
     }
 
-    // Recherche libre (texte non numérique) sur tout l'historique.
+    // Recherche libre (texte non numérique). Respecte la plage de dates si
+    // renseignée, sinon balaye tout l'historique.
     async function searchEvents(q) {
       const type = document.getElementById("typeFilter").value;
+      const f = document.getElementById("dateFrom").value, t = document.getElementById("dateTo").value;
+      const tq = (f || t) ? `start=${f}&end=${t}` : "days=3650";
       document.getElementById("eventsTitle").textContent = `Résultats pour « ${q} »`;
-      renderEvents(await api(`/api/events?days=3650&limit=150&type=${type}&q=${encodeURIComponent(q)}`));
+      renderEvents(await api(`/api/events?${tq}&limit=150&type=${type}&q=${encodeURIComponent(q)}`));
     }
 
     // Fiche d'un client (par ID) : infos + abonnements + tous ses événements.
@@ -517,7 +539,19 @@
       document.querySelector("table").scrollIntoView({ behavior: "smooth", block: "center" });
     });
 
-    document.getElementById("period").addEventListener("change", refreshAll);
+    // Changer la période efface une éventuelle plage de dates (priorité claire).
+    document.getElementById("period").addEventListener("change", () => {
+      document.getElementById("dateFrom").value = "";
+      document.getElementById("dateTo").value = "";
+      refreshAll();
+    });
+    document.getElementById("dateFrom").addEventListener("change", refreshAll);
+    document.getElementById("dateTo").addEventListener("change", refreshAll);
+    document.getElementById("resetDates").addEventListener("click", () => {
+      document.getElementById("dateFrom").value = "";
+      document.getElementById("dateTo").value = "";
+      refreshAll();
+    });
     document.getElementById("typeFilter").addEventListener("change", () => { highlightCards(); runSearch(); });
     // Recherche : debounce 300 ms pour ne pas requêter à chaque frappe.
     let searchTimer = null;

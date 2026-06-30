@@ -78,8 +78,12 @@ def dashboard_logout():
 
 
 @router.get("/dashboard/api/summary", dependencies=[Depends(auth.require_session)])
-def api_summary(days: int = Query(30, ge=1, le=365)):
-    data = events_db.summary(days=days)
+def api_summary(
+    days: int = Query(30, ge=1, le=3650),
+    start: str = Query("", description="Date de début YYYY-MM-DD (prioritaire sur days)"),
+    end: str = Query("", description="Date de fin YYYY-MM-DD"),
+):
+    data = events_db.summary(days=days, start=start or None, end=end or None)
     data["queue"] = queue_store.stats()
     try:
         data["paiment_total"] = pg.count_paiements()
@@ -90,13 +94,21 @@ def api_summary(days: int = Query(30, ge=1, le=365)):
 
 
 @router.get("/dashboard/api/refusals", dependencies=[Depends(auth.require_session)])
-def api_refusals(days: int = Query(30, ge=1, le=365)):
-    return events_db.refusals_by_cause(days=days)
+def api_refusals(
+    days: int = Query(30, ge=1, le=3650),
+    start: str = Query(""),
+    end: str = Query(""),
+):
+    return events_db.refusals_by_cause(days=days, start=start or None, end=end or None)
 
 
 @router.get("/dashboard/api/timeseries", dependencies=[Depends(auth.require_session)])
-def api_timeseries(days: int = Query(30, ge=1, le=365)):
-    return events_db.timeseries(days=days)
+def api_timeseries(
+    days: int = Query(30, ge=1, le=3650),
+    start: str = Query(""),
+    end: str = Query(""),
+):
+    return events_db.timeseries(days=days, start=start or None, end=end or None)
 
 
 @router.get("/dashboard/api/events", dependencies=[Depends(auth.require_session)])
@@ -105,8 +117,13 @@ def api_events(
     limit: int = Query(150, ge=1, le=1000),
     type: str = Query("", alias="type"),
     q: str = Query("", description="Recherche libre (client, téléphone, txn, paiement, montant)"),
+    start: str = Query(""),
+    end: str = Query(""),
 ):
-    return events_db.recent_events(limit=limit, type_filter=type or None, days=days, q=q or None)
+    return events_db.recent_events(
+        limit=limit, type_filter=type or None, days=days, q=q or None,
+        start=start or None, end=end or None,
+    )
 
 
 @router.get("/dashboard/api/event_detail", dependencies=[Depends(auth.require_session)])
