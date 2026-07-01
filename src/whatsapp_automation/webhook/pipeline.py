@@ -370,6 +370,29 @@ async def process(payload: dict) -> dict:
             len(suspended_services), plan.total_due, amount_paid, existing_credit,
             available, plan.covered_count, plan.remainder, unblock_macs,
         )
+        # Filet : des abos suspendus existent mais plan_unblocks n'a rien pu
+        # débloquer — typiquement parce que les services UCRM n'ont pas de
+        # `macAddress` (ou pas de prix) exploitable, donc rien à répartir. Si
+        # le solde CRM agrégé est couvert par le paiement, on se rabat sur les
+        # MAC LOCAUX du client (source fiable, celle qu'utilise le worker pour
+        # débloquer via MikroTik). Sans ce filet, un paiement complet reste
+        # faussement classé "sous-paiement".
+        if not unblock_macs and should_unblock_client(
+            amount_paid=amount_paid,
+            crm_balance=crm_balance,
+            threshold=config.UNDERPAYMENT_TOLERANCE,
+        ):
+            unblock_macs = sorted({
+                (r.get("mac") or "").strip()
+                for r in client_rows
+                if (r.get("mac") or "").strip()
+                and not (r.get("mac") or "").strip().lower().startswith("pending-")
+            })
+            logger.info(
+                "abos suspendus sans MAC/prix UCRM exploitable mais solde couvert "
+                "(balance=%d payé=%d) → repli sur MAC locaux : %s",
+                crm_balance, amount_paid, unblock_macs,
+            )
     else:
         # Aucun service suspendu exploitable (services UCRM indispo, ou client
         # déjà actif qui paie en avance) → repli sur la règle mono-abo
