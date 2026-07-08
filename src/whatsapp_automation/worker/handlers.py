@@ -78,10 +78,13 @@ def _macs_to_unblock(job: Job) -> list[str]:
 def _build_message_body(job: Job) -> str:
     """Construit le message WhatsApp envoyé au client après traitement.
 
-    3 montants sont toujours affichés (total dû / payé / reste). Le ton diffère
-    selon que le client est débloqué ou pas. Le sur-paiement ajoute une ligne
-    `Avoir` pour le crédit en surplus.
+    Le message débute par une salutation « Bonjour <nom> » (ou « Bonjour »
+    seul si le nom est indisponible). 3 montants sont toujours affichés
+    (total dû / payé / reste). Le ton diffère selon que le client est
+    débloqué ou pas. Le sur-paiement ajoute une ligne `Avoir` pour le
+    crédit en surplus.
     """
+    greeting = f"Bonjour {job.client.name}," if job.client.name else "Bonjour,"
     total = job.payment.crm_balance_before
     paid = job.payment.amount_mru
     diff = total - paid                # >0 reste, <0 sur-paiement
@@ -115,7 +118,7 @@ def _build_message_body(job: Job) -> str:
         header = "⚠ Paiement enregistré mais incomplet."
         footer = "Merci de compléter pour réactiver votre connexion."
 
-    return header + "\n\n" + "\n".join(lines) + "\n\n" + footer
+    return greeting + "\n\n" + header + "\n\n" + "\n".join(lines) + "\n\n" + footer
 
 
 def _should_skip(target_step: str, last_done: Optional[str]) -> bool:

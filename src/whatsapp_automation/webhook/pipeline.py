@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -57,6 +58,23 @@ UCRM_GET_BALANCE_DELAYS = (0, 1, 3)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _parse_client_name(info: Optional[str]) -> Optional[str]:
+    """Extrait le nom depuis le champ libre `info` = "<phone>-<nom>".
+
+    Même logique que le dashboard (routes.py). Retourne None si le nom
+    ne peut pas être isolé (info vide, ou uniquement numérique).
+    """
+    info = (info or "").strip()
+    if not info:
+        return None
+    m = re.match(r"\s*(\d+)\s*[-:_ ]\s*(.*)", info)
+    name = (m.group(2).strip() if m else info) or None
+    # Un `info` purement numérique (ex "46618380") n'a pas de nom exploitable.
+    if name and name.replace(" ", "").isdigit():
+        return None
+    return name
 
 
 async def _ucrm_with_retry(factory, label: str, client_id: int):
@@ -432,6 +450,7 @@ async def process(payload: dict) -> dict:
         client=Client(
             id=client_row["idclient"],
             phone=client_phone,
+            name=_parse_client_name(client_row.get("info")),
             mac_address=client_row.get("mac"),
             ip_address=client_row.get("ipaddress"),
             current_status="suspended" if was_suspended else "active",
