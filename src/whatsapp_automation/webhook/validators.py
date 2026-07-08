@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -126,6 +127,29 @@ def validate_document_type(
     hits = sum(1 for marker in _SUBSCRIPTION_FORM_MARKERS if marker in text_compact)
     if hits >= _SUBSCRIPTION_FORM_MIN_HITS:
         return ValidationResult(False, "subscription_form")
+    return ValidationResult(True)
+
+
+# Marqueur d'échec de transaction. Les applis mobiles (Sedad, Masrvi, Bankily…)
+# affichent une pop-up « Erreur » par-dessus le reçu quand le paiement échoue
+# (ex : « L'utilisateur n'est pas autorisé en tant que bénéficiaire »). Le reçu
+# sous-jacent reste visible → montant + bénéficiaire sont quand même extraits et
+# le paiement passait à tort. La présence du mot « Erreur » suffit à rejeter.
+_TRANSACTION_ERROR_RE = re.compile(r"\berreur", re.IGNORECASE)
+
+
+def validate_no_transaction_error(raw_text: Optional[str]) -> ValidationResult:
+    """Rejette les captures d'un paiement ÉCHOUÉ.
+
+    Détection volontairement simple (cf. consigne métier) : si le mot « Erreur »
+    apparaît dans le texte OCR, on considère que la transaction a échoué (pop-up
+    d'erreur de l'appli) et on refuse d'encaisser.
+
+    Retourne ``ok=False, reason="transaction_error"`` si un échec est détecté,
+    ``ok=True`` sinon (y compris si ``raw_text`` est vide).
+    """
+    if raw_text and _TRANSACTION_ERROR_RE.search(raw_text):
+        return ValidationResult(False, "transaction_error")
     return ValidationResult(True)
 
 
