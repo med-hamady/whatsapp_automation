@@ -85,6 +85,15 @@ AI_OCR_DATASET_PATH = _get(
     str(_DATA_DIR / "dataset"),
 )
 
+# Base SQLite dédiée aux paiements reçus d'un numéro non reconnu (client_not_found).
+# Préserve les données structurées (montant, txn_id, sample_id...) pour permettre
+# un rattachement/retraitement manuel ultérieur depuis le dashboard — distincte
+# d'events.db (simple cache de logs) et de PostgreSQL (schéma clients intouché).
+UNKNOWN_CLIENTS_DB_PATH = _get(
+    "UNKNOWN_CLIENTS_DB_PATH",
+    str(_DATA_DIR / "unknown_clients.db"),
+)
+
 N_WORKERS = int(_get("N_WORKERS", "2"))
 WORKER_POLL_INTERVAL = float(_get("WORKER_POLL_INTERVAL", "1.0"))
 

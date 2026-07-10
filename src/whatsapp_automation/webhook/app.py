@@ -22,7 +22,7 @@ from ..jobqueue import store as queue_store
 from ..worker import mikrotik, ucrm
 from . import pipeline
 from .dashboard import router as dashboard_router
-from .dashboard import events_db
+from .dashboard import events_db, unknown_clients_store
 from .phone import parse_from_field
 
 
@@ -81,6 +81,7 @@ async def _events_ingest_loop(stop: asyncio.Event):
 async def lifespan(app: FastAPI):
     queue_store.init_db()
     events_db.init_db()
+    unknown_clients_store.init_db()
     stop = asyncio.Event()
     ingest_task = asyncio.create_task(_events_ingest_loop(stop))
     try:

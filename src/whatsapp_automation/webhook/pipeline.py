@@ -28,6 +28,7 @@ from ..jobqueue import store as queue_store
 from ..db import postgres as pg
 from ..worker import ucrm, ultramsg
 from .ai_ocr_client import extract as ai_ocr_extract
+from .dashboard import unknown_clients_store
 from .image_downloader import download as download_image
 from .phone import parse_body_number, parse_from_field
 from .validators import (
@@ -179,6 +180,34 @@ async def _notify_support_failure(
         )
 
 
+def _save_unknown_client(
+    *,
+    sample_id: str,
+    txn_id: Optional[str],
+    amount: Optional[int],
+    date_heure: Optional[str],
+    operator: str,
+    from_phone: str,
+    body_phone: Optional[str],
+    group_id: Optional[str],
+    raw_text: str,
+) -> None:
+    """Préserve les données du paiement dans `numeros_introuvable` (Phase 1 :
+    aucun Job créé, aucun appel UCRM/MikroTik). insert_unknown_client() est
+    déjà best-effort (erreur SQLite loggée, jamais levée)."""
+    unknown_clients_store.insert_unknown_client(
+        sample_id=sample_id,
+        txn_id=txn_id,
+        amount=amount,
+        date_heure=date_heure,
+        operator=operator,
+        original_phone=from_phone,
+        body_phone=body_phone,
+        group_id=group_id,
+        raw_text=raw_text,
+    )
+
+
 async def process(payload: dict) -> dict:
     """Traite un payload UltraMsg. Retourne un résumé (pour logs/debug ;
     UltraMsg n'utilise pas la réponse au-delà du status 200)."""
@@ -280,6 +309,17 @@ async def process(payload: dict) -> dict:
             valid_client.reason, from_phone, group_id or "-",
         )
         if valid_client.reason == "client_not_found":
+            _save_unknown_client(
+                sample_id=sample_id,
+                txn_id=txn_id,
+                amount=extracted.get("montant"),
+                date_heure=extracted.get("date_heure"),
+                operator=template,
+                from_phone=from_phone,
+                body_phone=body_phone,
+                group_id=group_id,
+                raw_text=raw_text,
+            )
             await _notify_support_failure(
                 reason="client_not_found",
                 from_phone=from_phone,
