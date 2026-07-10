@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from ... import config
 from ...db import postgres as pg
 from ...jobqueue import store as queue_store
-from . import auth, events_db, samples
+from . import auth, events_db, samples, unknown_clients_store
 
 logger = logging.getLogger("whatsapp_automation.webhook.dashboard")
 
@@ -274,6 +274,31 @@ def api_client(id: int = Query(..., ge=1, description="ID client")):
         } for p in paiements],
         "events": events,
     }
+
+
+@router.get("/dashboard/api/unknown-clients", dependencies=[Depends(auth.require_session)])
+def api_unknown_clients(
+    limit: int = Query(50, ge=1, le=500),
+    status: str = Query("", description="Filtre statut (pending, ...). Vide = tous."),
+):
+    """Paiements reçus d'un numéro non rattaché à un client (table dédiée
+    `numeros_introuvable`, Phase 1). Lecture seule, aucun appel externe."""
+    return unknown_clients_store.list_recent(limit=limit, status=status or None)
+
+
+@router.get(
+    "/dashboard/api/unknown-clients/{id}", dependencies=[Depends(auth.require_session)]
+)
+def api_unknown_client_detail(id: int):
+    """Détail d'un enregistrement `numeros_introuvable`. Ajoute `sample_sid`
+    (hex du sample OCR, dérivé de sample_id) pour que le front puisse charger
+    l'image via /dashboard/api/sample_image?date=...&sid=..., sans appel externe."""
+    row = unknown_clients_store.get_by_id(id)
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+    if row.get("sample_id") and "/" in row["sample_id"]:
+        row["sample_sid"] = row["sample_id"].split("/", 1)[1]
+    return row
 
 
 @router.get("/dashboard/api/sample_image", dependencies=[Depends(auth.require_session)])

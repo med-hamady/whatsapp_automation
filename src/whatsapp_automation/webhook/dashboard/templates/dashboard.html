@@ -112,6 +112,17 @@
     #mPdf a { color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 600; }
     #mPdf iframe { width: 100%; height: 430px; margin-top: 8px; border: 1px solid var(--border);
                    border-radius: 10px; background: #fff; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .btn-pay { background: var(--blue); color: #fff; border-color: var(--blue); font-weight: 600; }
+    .btn-pay:hover { background: var(--navy); border-color: var(--navy); }
+    .warn-box { border-left: 3px solid var(--coral); background: #fdebe6; color: var(--coral-dark);
+                padding: 12px 14px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; margin-top: 10px; }
+    .ok-box { border-left: 3px solid var(--blue); background: var(--blue-tint); color: var(--navy);
+              padding: 12px 14px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; }
+    .uc-payer-form { margin-top: 14px; }
+    .uc-payer-form input[type="text"] { flex: 1; padding: 8px 10px; border: 1px solid var(--border);
+                                         border-radius: 8px; font-size: 14px; color: var(--text); background: var(--card); }
+    .uc-payer-form input[type="text"]:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
     @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } .modal-body { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -173,6 +184,17 @@
         <tbody id="events"></tbody>
       </table>
     </div>
+
+    <div class="panel" style="margin-top: 24px;">
+      <div class="tbl-head">
+        <h2 style="margin:0;">Numéros clients introuvables — en attente d'association</h2>
+      </div>
+      <table>
+        <thead><tr><th>Reçu le</th><th>Téléphone</th><th>Montant</th><th>Opérateur</th>
+                    <th>Transaction</th><th>Statut</th><th></th></tr></thead>
+        <tbody id="ucRows"></tbody>
+      </table>
+    </div>
   </main>
 
   <div class="modal-overlay" id="modal" style="display:none;">
@@ -203,6 +225,44 @@
             <div id="mImageWrap"></div>
             <h4>Texte OCR brut</h4>
             <div id="mOcr" class="muted" style="font-size:12px; white-space:pre-wrap; word-break:break-word;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="ucModal" style="display:none;">
+    <div class="modal" style="width: min(720px, 96vw);">
+      <div class="modal-head">
+        <h3>Numéro client introuvable</h3>
+        <button id="ucClose" title="Fermer">✕</button>
+      </div>
+      <div style="padding: 20px;">
+        <div class="meta" id="ucMeta"></div>
+        <div id="ucTxnWarn"></div>
+        <h4>Capture reçue</h4>
+        <div id="ucImageWrap"></div>
+        <h4>Texte OCR brut</h4>
+        <div id="ucRaw" class="muted" style="font-size:12px; white-space:pre-wrap; word-break:break-word;"></div>
+
+        <div id="ucPayerBox" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px;">
+          <button id="ucPayerBtn" class="btn-pay">Payer</button>
+          <div id="ucPayerForm" class="uc-payer-form" style="display:none;">
+            <div class="explain">
+              En Phase 2, ce bouton ne crée <b>ni paiement ni tâche</b>. Il servira, en Phase 3,
+              à associer ce reçu au bon client (via le numéro saisi ci-dessous) puis à créer
+              une tâche dans la file d'attente existante, après confirmation. La réponse
+              WhatsApp finale sera toujours envoyée au numéro qui a transmis le reçu, pas
+              nécessairement au numéro de l'abonnement.
+            </div>
+            <label class="muted" style="font-size:12px; display:block; margin-top:12px;">
+              Numéro de téléphone du client (8 chiffres, ex. 37697850)
+            </label>
+            <div style="display:flex; gap:8px; margin-top:6px;">
+              <input id="ucPhoneInput" type="text" placeholder="37697850 ou +22237697850" maxlength="20">
+              <button id="ucPhoneSubmit" class="btn-pay">Valider</button>
+            </div>
+            <div id="ucPhoneMsg" style="margin-top:10px;"></div>
           </div>
         </div>
       </div>
@@ -508,11 +568,139 @@
     document.getElementById("modal").addEventListener("click", (e) => {
       if (e.target.id === "modal") closeModal();
     });
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+    // --- Numéros clients introuvables (Phase 2 : lecture seule + popup "Payer" UI-only) ---
+    let lastUnknownClients = [];
+
+    function ucRow(r) {
+      const phone = r.original_phone || r.body_phone || "—";
+      const amount = r.amount != null ? `${r.amount} MRU` : "—";
+      const txn = r.txn_id ? r.txn_id : `<span class="muted">manquant</span>`;
+      const payBtn = r.status === "pending"
+        ? `<button class="btn-pay uc-pay-btn" data-id="${r.id}">Payer</button>` : "";
+      return `<tr class="ev-row uc-row" data-id="${r.id}">
+        <td class="muted">${r.date_heure || "—"}</td>
+        <td>${phone}</td>
+        <td>${amount}</td>
+        <td class="muted">${r.operator || "—"}</td>
+        <td class="muted">${txn}</td>
+        <td><span class="badge b-warn">${r.status}</span></td>
+        <td>${payBtn}</td>
+      </tr>`;
+    }
+
+    async function loadUnknownClients() {
+      lastUnknownClients = await api(`/api/unknown-clients?status=pending&limit=50`);
+      document.getElementById("ucRows").innerHTML = lastUnknownClients.map(ucRow).join("")
+        || `<tr><td colspan="7" class="muted">Aucun numéro introuvable en attente.</td></tr>`;
+    }
+
+    function resetUcPayerForm() {
+      document.getElementById("ucPayerForm").style.display = "none";
+      document.getElementById("ucPhoneInput").value = "";
+      document.getElementById("ucPhoneMsg").innerHTML = "";
+      document.getElementById("ucTxnWarn").innerHTML = "";
+      document.getElementById("ucPhoneSubmit").disabled = false;
+      document.getElementById("ucPhoneInput").disabled = false;
+    }
+
+    function closeUcModal() { document.getElementById("ucModal").style.display = "none"; }
+
+    async function openUnknownClientDetail(id, openPayer) {
+      document.getElementById("ucModal").style.display = "flex";
+      document.getElementById("ucMeta").innerHTML = `<div class="muted">Chargement…</div>`;
+      document.getElementById("ucImageWrap").innerHTML = "";
+      document.getElementById("ucRaw").textContent = "";
+      resetUcPayerForm();
+
+      let d;
+      try { d = await api(`/api/unknown-clients/${id}`); }
+      catch (_) { closeUcModal(); return; }
+
+      document.getElementById("ucMeta").innerHTML = [
+        `<div><b>Reçu le :</b> ${d.date_heure || "—"}</div>`,
+        `<div><b>Téléphone expéditeur (WhatsApp) :</b> ${d.original_phone || "—"}</div>`,
+        d.body_phone ? `<div><b>Téléphone mentionné dans le message :</b> ${d.body_phone}</div>` : "",
+        `<div><b>Montant :</b> ${d.amount != null ? d.amount + " MRU" : "—"}</div>`,
+        `<div><b>Opérateur :</b> ${d.operator || "—"}</div>`,
+        `<div><b>Transaction :</b> ${d.txn_id || `<span class="muted">manquante</span>`}</div>`,
+        `<div><b>Statut :</b> ${d.status}</div>`,
+      ].join("");
+
+      document.getElementById("ucTxnWarn").innerHTML = d.txn_id ? "" : `<div class="warn-box">
+        ⚠️ Transaction (txn_id) manquante sur ce reçu : une association / un paiement
+        automatique ne peut pas être fait en toute sécurité sans elle. L'action « Payer »
+        reste désactivée pour cet enregistrement.</div>`;
+
+      if (d.sample_date && d.sample_sid) {
+        const src = `${BASE}/api/sample_image?date=${d.sample_date}&sid=${d.sample_sid}`;
+        document.getElementById("ucImageWrap").innerHTML =
+          `<a href="${src}" target="_blank"><img src="${src}" alt="capture"
+             style="width:100%; border-radius:10px; border:1px solid var(--border);"></a>`;
+      } else {
+        document.getElementById("ucImageWrap").innerHTML = `<div class="none">Capture non disponible.</div>`;
+      }
+      document.getElementById("ucRaw").textContent = d.raw_text || "—";
+
+      const payBox = document.getElementById("ucPayerBox");
+      payBox.style.display = d.status === "pending" ? "" : "none";
+      document.getElementById("ucPhoneSubmit").disabled = !d.txn_id;
+      document.getElementById("ucPhoneInput").disabled = !d.txn_id;
+
+      if (openPayer && d.status === "pending") {
+        document.getElementById("ucPayerForm").style.display = "";
+      }
+    }
+
+    document.getElementById("ucRows").addEventListener("click", (e) => {
+      const tr = e.target.closest("tr.uc-row");
+      if (!tr) return;
+      const isPayBtn = !!e.target.closest(".uc-pay-btn");
+      openUnknownClientDetail(+tr.dataset.id, isPayBtn);
+    });
+
+    document.getElementById("ucPayerBtn").addEventListener("click", () => {
+      const form = document.getElementById("ucPayerForm");
+      form.style.display = form.style.display === "none" ? "" : "none";
+    });
+
+    // Normalise un numéro mauritanien saisi ("+222 37 69 78 50", "22237697850"…) → 8 chiffres.
+    function normalizePhoneMR(raw) {
+      let d = (raw || "").trim().replace(/[^\d]/g, "");
+      if (d.startsWith("222") && d.length > 8) d = d.slice(3);
+      return d;
+    }
+    function isValidPhoneMR(raw) { return /^\d{8}$/.test(normalizePhoneMR(raw)); }
+
+    document.getElementById("ucPhoneSubmit").addEventListener("click", () => {
+      const btn = document.getElementById("ucPhoneSubmit");
+      const input = document.getElementById("ucPhoneInput");
+      const msg = document.getElementById("ucPhoneMsg");
+      if (!isValidPhoneMR(input.value)) {
+        msg.innerHTML = `<div class="warn-box">Numéro invalide. Format attendu : 8 chiffres
+          (ex. 37697850) ou +222XXXXXXXX.</div>`;
+        return;
+      }
+      const normalized = normalizePhoneMR(input.value);
+      btn.disabled = true; input.disabled = true;
+      // Phase 2 : aucun appel réseau, aucune écriture — message local uniquement.
+      msg.innerHTML = `<div class="ok-box">Phase 2 UI only : numéro saisi prêt pour association
+        (+222${normalized}). Aucun paiement n'a été créé.<br>
+        <span class="muted" style="font-size:12px;">Statut : Prêt pour Phase 3.</span></div>`;
+    });
+
+    document.getElementById("ucClose").addEventListener("click", closeUcModal);
+    document.getElementById("ucModal").addEventListener("click", (e) => {
+      if (e.target.id === "ucModal") closeUcModal();
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { closeModal(); closeUcModal(); }
+    });
 
     async function refreshAll() {
       try {
-        await Promise.all([loadSummary(), loadRefus(), loadTime(), runSearch()]);
+        await Promise.all([loadSummary(), loadRefus(), loadTime(), runSearch(), loadUnknownClients()]);
         document.getElementById("updated").textContent =
           "Mis à jour " + new Date().toLocaleTimeString("fr-FR");
       } catch (_) { /* 401 gère le reload */ }

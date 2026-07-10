@@ -165,10 +165,28 @@ def get_by_sample_id(sample_id: str, db_path: Optional[str] = None) -> Optional[
     return _row_to_dict(row) if row else None
 
 
-def list_recent(limit: int = 50, db_path: Optional[str] = None) -> list[dict]:
+def get_by_id(id: int, db_path: Optional[str] = None) -> Optional[dict]:
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM numeros_introuvable ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        row = conn.execute(
+            "SELECT * FROM numeros_introuvable WHERE id = ?",
+            (id,),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def list_recent(
+    limit: int = 50, status: Optional[str] = None, db_path: Optional[str] = None
+) -> list[dict]:
+    with _connect(db_path) as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM numeros_introuvable WHERE status = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM numeros_introuvable ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
     return [_row_to_dict(r) for r in rows]
