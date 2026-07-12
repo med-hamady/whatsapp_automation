@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 from ... import config
 from ...db import postgres as pg
 from ...jobqueue import store as queue_store
+from ..phone import normalize_mr_phone
 from . import auth, events_db, samples, unknown_clients_store
 
 logger = logging.getLogger("whatsapp_automation.webhook.dashboard")
@@ -311,3 +313,91 @@ def api_sample_image(
     if not path:
         raise HTTPException(status_code=404, detail="image_not_found")
     return FileResponse(path, media_type="image/jpeg")
+
+
+class AssociateBody(BaseModel):
+    entered_phone: str = ""
+
+
+def _phone_from_info(info: Optional[str]) -> Optional[str]:
+    """Numéro préfixe du champ `info` ("<phone>-<nom>"), même parsing que
+    api_client ci-dessus — le "vrai" téléphone connu de PostgreSQL pour cette
+    ligne (peut différer du numéro saisi par l'admin)."""
+    m = re.match(r"\s*(\d{6,})", info or "")
+    return m.group(1) if m else None
+
+
+@router.post(
+    "/dashboard/api/unknown-clients/{id}/associate",
+    dependencies=[Depends(auth.require_session)],
+)
+def api_unknown_client_associate(id: int, body: AssociateBody):
+    """Phase 3 : associe un enregistrement `numeros_introuvable` au client
+    PostgreSQL réel trouvé via le numéro saisi par l'admin dans le modal
+    "Payer" du dashboard.
+
+    Lecture seule sur PostgreSQL (aucune écriture). Écrit uniquement dans la
+    base SQLite dédiée `numeros_introuvable`. Ne crée AUCUN paiement, AUCUN
+    Job de file d'attente, et n'appelle ni UCRM, ni MikroTik, ni UltraMsg.
+    """
+    row = unknown_clients_store.get_by_id(id)
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    if not row.get("txn_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="Ce reçu ne contient pas de txn_id fiable. Traitement automatique refusé.",
+        )
+
+    normalized = normalize_mr_phone(body.entered_phone)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Numéro de téléphone invalide.")
+
+    try:
+        client_rows = pg.get_clients_by_phone(normalized)
+    except Exception as exc:
+        logger.warning("dashboard: associate get_clients_by_phone KO (id=%s): %s", id, exc)
+        raise HTTPException(status_code=502, detail="Base clients PostgreSQL indisponible.")
+
+    if not client_rows:
+        unknown_clients_store.mark_unknown_client_error(
+            id, f"Aucun client PostgreSQL trouvé pour le numéro {normalized}",
+        )
+        raise HTTPException(status_code=404, detail="Aucun client trouvé pour ce numéro.")
+
+    # Phase 3 : simple aperçu, on ne retient qu'une ligne représentative.
+    # TODO Phase 4 : avant de créer le Job, recalculer TOUTES les lignes
+    # `client_rows` (un client peut avoir plusieurs abonnements/MAC) — ne pas
+    # se fier aveuglément à cet aperçu pour la décision de déblocage.
+    first = client_rows[0]
+    client_id = str(first["idclient"])
+    mac_address = first.get("mac") or None
+    statu = first.get("statu")
+    status_label = "suspended" if statu == 2 else ("active" if statu == 0 else None)
+    subscription_phone = _phone_from_info(first.get("info")) or normalized
+
+    updated = unknown_clients_store.associate_unknown_client(
+        id,
+        entered_phone=normalized,
+        subscription_phone=subscription_phone,
+        client_id=client_id,
+        mac_address=mac_address,
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="Échec de l'association (SQLite).")
+
+    return {
+        "ok": True,
+        "status": "associated",
+        "unknown_client": updated,
+        "client_preview": {
+            "client_id": client_id,
+            "subscription_phone": subscription_phone,
+            "mac_address": mac_address,
+            "status": status_label,
+            "ip_address": first.get("ipaddress"),
+            "rows_count": len(client_rows),
+        },
+        "message": "Client associé. Aucun paiement n'a été créé.",
+    }

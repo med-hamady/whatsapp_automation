@@ -60,6 +60,26 @@ INSERT OR IGNORE INTO numeros_introuvable
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
 """
 
+# Phase 3 : colonnes d'association client (ajoutées via migration ALTER TABLE
+# pour ne pas casser les bases SQLite déjà déployées en Phase 1/2).
+# `client_id` en TEXT (pas INTEGER) : PostgreSQL stocke `client.idclient` en
+# VARCHAR(250), cf. db/postgres.py — on garde le même type ici pour éviter
+# toute conversion avec perte entre les deux bases.
+_NEW_COLUMNS = {
+    "entered_phone": "TEXT",
+    "subscription_phone": "TEXT",
+    "client_id": "TEXT",
+    "mac_address": "TEXT",
+    "associated_at": "REAL",
+}
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(numeros_introuvable)")}
+    for name, col_type in _NEW_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE numeros_introuvable ADD COLUMN {name} {col_type}")
+
 
 def _path(db_path: Optional[str]) -> str:
     return db_path or config.UNKNOWN_CLIENTS_DB_PATH
@@ -77,6 +97,8 @@ def init_db(db_path: Optional[str] = None) -> None:
     Path(_path(db_path)).parent.mkdir(parents=True, exist_ok=True)
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
+        _migrate_columns(conn)
+        conn.commit()
 
 
 def _sample_date(sample_id: str) -> Optional[str]:
@@ -153,6 +175,11 @@ def _row_to_dict(r: sqlite3.Row) -> dict:
         "error_message": r["error_message"],
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
+        "entered_phone": r["entered_phone"],
+        "subscription_phone": r["subscription_phone"],
+        "client_id": r["client_id"],
+        "mac_address": r["mac_address"],
+        "associated_at": r["associated_at"],
     }
 
 
@@ -190,3 +217,54 @@ def list_recent(
                 (limit,),
             ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+def associate_unknown_client(
+    id: int,
+    *,
+    entered_phone: str,
+    subscription_phone: Optional[str],
+    client_id: str,
+    mac_address: Optional[str],
+    db_path: Optional[str] = None,
+) -> Optional[dict]:
+    """Phase 3 : rattache l'enregistrement au client PostgreSQL trouvé par le
+    numéro saisi par l'admin. N'écrit que dans cette base SQLite dédiée — ne
+    crée aucun paiement/Job, n'appelle ni UCRM ni MikroTik ni UltraMsg.
+
+    status pending -> associated. `error_message` est effacé (une nouvelle
+    tentative réussie annule un échec précédent éventuel)."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """UPDATE numeros_introuvable
+               SET entered_phone = ?, subscription_phone = ?, client_id = ?,
+                   mac_address = ?, status = 'associated', associated_at = ?,
+                   updated_at = ?, error_message = NULL
+               WHERE id = ?""",
+            (entered_phone, subscription_phone, client_id, mac_address, now, now, id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM numeros_introuvable WHERE id = ?", (id,)
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def mark_unknown_client_error(
+    id: int, error_message: str, db_path: Optional[str] = None
+) -> Optional[dict]:
+    """Enregistre un message d'erreur (numéro invalide, client introuvable...)
+    sans changer le statut : l'enregistrement reste 'pending' pour une
+    nouvelle tentative d'association."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE numeros_introuvable SET error_message = ?, updated_at = ? WHERE id = ?",
+            (error_message, now, id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM numeros_introuvable WHERE id = ?", (id,)
+        ).fetchone()
+    return _row_to_dict(row) if row else None

@@ -249,11 +249,11 @@
           <button id="ucPayerBtn" class="btn-pay">Payer</button>
           <div id="ucPayerForm" class="uc-payer-form" style="display:none;">
             <div class="explain">
-              En Phase 2, ce bouton ne crée <b>ni paiement ni tâche</b>. Il servira, en Phase 3,
-              à associer ce reçu au bon client (via le numéro saisi ci-dessous) puis à créer
-              une tâche dans la file d'attente existante, après confirmation. La réponse
-              WhatsApp finale sera toujours envoyée au numéro qui a transmis le reçu, pas
-              nécessairement au numéro de l'abonnement.
+              Cette étape associe le reçu au client PostgreSQL trouvé via le numéro saisi
+              ci-dessous. Elle ne crée <b>ni paiement ni tâche</b> — le déblocage réel passera,
+              dans une phase suivante, par la file d'attente existante après confirmation.
+              La réponse WhatsApp finale sera toujours envoyée au numéro qui a transmis le
+              reçu, pas nécessairement au numéro de l'abonnement.
             </div>
             <label class="muted" style="font-size:12px; display:block; margin-top:12px;">
               Numéro de téléphone du client (8 chiffres, ex. 37697850)
@@ -307,6 +307,19 @@
       const res = await fetch(`${BASE}${path}`);
       if (res.status === 401) { window.location.reload(); throw new Error("401"); }
       return res.json();
+    }
+
+    // POST JSON — renvoie {ok, status, body} sans jeter sur les erreurs métier
+    // (400/404/409/502) : l'appelant lit `body.detail` pour afficher le message.
+    async function apiPost(path, payload) {
+      const res = await fetch(`${BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.status === 401) { window.location.reload(); throw new Error("401"); }
+      const body = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, body };
     }
 
     // `type` (optionnel) rend la carte cliquable → filtre la table sur ce type.
@@ -606,7 +619,10 @@
 
     function closeUcModal() { document.getElementById("ucModal").style.display = "none"; }
 
+    let currentUcId = null;
+
     async function openUnknownClientDetail(id, openPayer) {
+      currentUcId = id;
       document.getElementById("ucModal").style.display = "flex";
       document.getElementById("ucMeta").innerHTML = `<div class="muted">Chargement…</div>`;
       document.getElementById("ucImageWrap").innerHTML = "";
@@ -625,6 +641,8 @@
         `<div><b>Opérateur :</b> ${d.operator || "—"}</div>`,
         `<div><b>Transaction :</b> ${d.txn_id || `<span class="muted">manquante</span>`}</div>`,
         `<div><b>Statut :</b> ${d.status}</div>`,
+        d.status === "associated" ? `<div><b>Client associé :</b> ${d.client_id ?? "—"}
+           (MAC ${d.mac_address || "—"}, tél. abonnement ${d.subscription_phone || "—"})</div>` : "",
       ].join("");
 
       document.getElementById("ucTxnWarn").innerHTML = d.txn_id ? "" : `<div class="warn-box">
@@ -672,7 +690,7 @@
     }
     function isValidPhoneMR(raw) { return /^\d{8}$/.test(normalizePhoneMR(raw)); }
 
-    document.getElementById("ucPhoneSubmit").addEventListener("click", () => {
+    document.getElementById("ucPhoneSubmit").addEventListener("click", async () => {
       const btn = document.getElementById("ucPhoneSubmit");
       const input = document.getElementById("ucPhoneInput");
       const msg = document.getElementById("ucPhoneMsg");
@@ -681,12 +699,39 @@
           (ex. 37697850) ou +222XXXXXXXX.</div>`;
         return;
       }
+      if (!currentUcId) return;
       const normalized = normalizePhoneMR(input.value);
       btn.disabled = true; input.disabled = true;
-      // Phase 2 : aucun appel réseau, aucune écriture — message local uniquement.
-      msg.innerHTML = `<div class="ok-box">Phase 2 UI only : numéro saisi prêt pour association
-        (+222${normalized}). Aucun paiement n'a été créé.<br>
-        <span class="muted" style="font-size:12px;">Statut : Prêt pour Phase 3.</span></div>`;
+      msg.innerHTML = `<div class="muted">Recherche du client en cours…</div>`;
+
+      let res;
+      try {
+        res = await apiPost(`/api/unknown-clients/${currentUcId}/associate`, {
+          entered_phone: normalized,
+        });
+      } catch (_) {
+        msg.innerHTML = `<div class="warn-box">Erreur réseau. Réessayez.</div>`;
+        btn.disabled = false; input.disabled = false;
+        return;
+      }
+
+      if (!res.ok) {
+        msg.innerHTML = `<div class="warn-box">${res.body.detail || "Association impossible."}</div>`;
+        btn.disabled = false; input.disabled = false;
+        return;
+      }
+
+      const p = res.body.client_preview || {};
+      msg.innerHTML = `<div class="ok-box">${res.body.message}<br>
+        <b>Client :</b> ${p.client_id ?? "—"} · <b>MAC :</b> ${p.mac_address || "—"}
+        · <b>Tél. abonnement :</b> ${p.subscription_phone || "—"}
+        ${p.status ? ` · <b>Statut :</b> ${p.status}` : ""}
+        ${p.rows_count > 1 ? `<br><span class="muted" style="font-size:12px;">${p.rows_count} abonnements trouvés pour ce client — un seul retenu pour cet aperçu.</span>` : ""}
+        </div>`;
+      // Association faite : on garde le formulaire désactivé (pas de nouvelle
+      // saisie sur ce même enregistrement) et on rafraîchit la liste (le
+      // statut n'est plus "pending", la ligne disparaît de la table).
+      loadUnknownClients();
     });
 
     document.getElementById("ucClose").addEventListener("click", closeUcModal);

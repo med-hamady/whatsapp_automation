@@ -25,3 +25,15 @@ def parse_body_number(body: str) -> str:
     if digits.startswith("222") and len(digits) > 8:
         return digits[3:]
     return digits
+
+
+def normalize_mr_phone(raw: str) -> str:
+    """Normalise un numéro mauritanien saisi manuellement (dashboard : association
+    Phase 3) : accepte "37697850", "+22237697850" ou "22237697850" → 8 chiffres.
+    Retourne "" si le résultat n'est pas exactement 8 chiffres (invalide)."""
+    if not raw:
+        return ""
+    digits = re.sub(r"[^0-9]", "", raw)
+    if digits.startswith("222") and len(digits) > 8:
+        digits = digits[3:]
+    return digits if re.fullmatch(r"\d{8}", digits) else ""
