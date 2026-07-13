@@ -187,6 +187,10 @@ async def lookup_client(
     Lecture seule. Auth obligatoire via header X-API-Key (sinon 401).
     Réponse partielle (champ ``null`` + détail dans ``errors``) si une source
     externe est injoignable — l'endpoint ne renvoie 500 que sur bug interne.
+
+    La DB locale sert à résoudre téléphone → idclient + MAC, mais elle n'est PAS
+    la source de vérité de l'existence d'un client : si elle ne connaît pas le
+    numéro, on retombe sur une recherche CRM (``found: true``, ``fai: []``).
     """
     if not config.CLIENT_API_KEY or x_api_key != config.CLIENT_API_KEY:
         raise HTTPException(status_code=401, detail="invalid_api_key")
@@ -197,21 +201,34 @@ async def lookup_client(
     # Un client peut avoir plusieurs abonnements (plusieurs lignes / MAC), d'où
     # get_clients_by_phone (toutes les lignes) et pas get_client_by_phone (1re).
     locals_ = pg.get_clients_by_phone(norm)
-    if not locals_:
-        return {
-            "phone": norm,
-            "found": False,
-            "crm": None,
-            "services_count": None,
-            "services": None,
-            "recent_invoices": None,
-            "fai_count": None,
-            "fai": None,
-            "errors": {"local": "not_found"},
-        }
 
-    # Les lignes d'un même client partagent l'idclient ; on l'utilise pour UCRM.
-    idclient = int(locals_[0]["idclient"])
+    if locals_:
+        # Les lignes d'un même client partagent l'idclient ; il sert pour UCRM.
+        idclient = int(locals_[0]["idclient"])
+        erreur_repli = None
+    else:
+        # Repli CRM : la DB locale n'est qu'un miroir (alimenté par la synchro),
+        # elle peut ignorer un client tout juste créé dans UCRM. Sans ce repli,
+        # un vrai client resterait introuvable tant qu'il n'est pas synchronisé.
+        # On interroge donc le CRM directement. `locals_` reste vide : le client
+        # n'a alors aucun équipement connu → `fai: []`, pas d'état Mikrotik.
+        repli = await _safe_call(ucrm.find_client_id_by_phone(norm))
+        idclient = repli["data"]
+        erreur_repli = repli["error"]
+        if idclient is None:
+            return {
+                "phone": norm,
+                "found": False,
+                "crm": None,
+                "services_count": None,
+                "services": None,
+                "recent_invoices": None,
+                "fai_count": None,
+                "fai": None,
+                # `crm_lookup` distingue « le CRM ne le connaît pas non plus »
+                # (null) d'une panne du CRM pendant le repli (message d'erreur).
+                "errors": {"local": "not_found", "crm_lookup": erreur_repli},
+            }
 
     # CRM (détails), services (forfaits), factures, et l'état Mikrotik de CHAQUE
     # MAC, tout en parallèle. _device_status isole déjà ses erreurs (jamais 500).

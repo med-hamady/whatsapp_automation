@@ -1,10 +1,13 @@
 """Sync UCRM clients to local postgres `client` table.
 
-Takes one or more UCRM client IDs and creates the missing rows locally. Useful
-when UCRM has clients the local DB hasn't seen yet (e.g. recently created via
-the UCRM UI but not provisioned through the legacy PHP flow).
+Creates the local rows missing for UCRM clients — soit pour des IDs explicites,
+soit (``--all``) pour TOUS les clients UCRM absents en local. Utile quand UCRM a
+des clients que la DB locale n'a jamais vus (créés via l'UI UCRM, sans passer
+par l'ancien flux de provisioning PHP) : sans ligne locale, ces clients sont
+invisibles de la recherche par téléphone et n'ont pas de MAC exploitable.
 
-Idempotent : an existing local client is left untouched.
+Idempotent : un client déjà présent en local est laissé intact. C'est ce qui
+permet de le planifier en tâche récurrente (cf. --all).
 
 Placeholder for `mac` : the local schema has UNIQUE (mac) NOT NULL but UCRM
 doesn't always expose a MAC on the service. We insert ``pending-{idclient}``
@@ -14,6 +17,8 @@ prefix and skips MikroTik unblock until a real MAC is set.
 Usage :
     python scripts/sync_clients_from_ucrm.py 1816 1822 1503
     python scripts/sync_clients_from_ucrm.py 1816 --apply
+    python scripts/sync_clients_from_ucrm.py --all            # dry-run
+    python scripts/sync_clients_from_ucrm.py --all --apply    # tâche planifiée
 """
 
 from __future__ import annotations
@@ -37,6 +42,37 @@ logger = logging.getLogger("sync_clients")
 
 def _crm_headers() -> dict:
     return {"Accept": "application/json", "x-auth-token": config.UCRM_CRM_TOKEN}
+
+
+async def fetch_all_client_ids(c: httpx.AsyncClient) -> list[int]:
+    """Liste les IDs de TOUS les clients UCRM (pagination limit/offset).
+
+    UCRM plafonne le nombre de clients renvoyés par appel ; on boucle jusqu'à
+    recevoir une page incomplète.
+    """
+    base = config.UCRM_BASE_URL
+    page = 500
+    offset = 0
+    ids: list[int] = []
+    while True:
+        r = await c.get(
+            f"{base}/crm/api/v1.0/clients",
+            headers=_crm_headers(),
+            params={"limit": page, "offset": offset},
+        )
+        r.raise_for_status()
+        lot = r.json() or []
+        ids.extend(int(cl["id"]) for cl in lot if cl.get("id") is not None)
+        if len(lot) < page:
+            return ids
+        offset += page
+
+
+def existing_local_ids() -> set[str]:
+    """IDs clients déjà présents en local (comparés en str : idclient est VARCHAR)."""
+    with pg.connection() as conn:
+        rows = conn.execute("SELECT idclient FROM client").fetchall()
+    return {str(row["idclient"]) for row in rows}
 
 
 async def fetch_client(c: httpx.AsyncClient, cid: int) -> tuple[dict | None, list]:
@@ -70,8 +106,10 @@ def map_ucrm_to_local(cid: int, client: dict, services: list) -> dict:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("client_ids", type=int, nargs="+",
-                        help="UCRM client IDs à synchroniser")
+    parser.add_argument("client_ids", type=int, nargs="*",
+                        help="UCRM client IDs à synchroniser (ignoré si --all)")
+    parser.add_argument("--all", action="store_true",
+                        help="Synchroniser TOUS les clients UCRM absents en local")
     parser.add_argument("--apply", action="store_true",
                         help="Effectuer les inserts (sinon dry-run)")
     args = parser.parse_args()
@@ -79,11 +117,28 @@ async def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
 
+    if not args.all and not args.client_ids:
+        parser.error("fournir des client_ids ou --all")
+
     async with httpx.AsyncClient(timeout=30.0, verify=False) as c:
-        results = await asyncio.gather(*(fetch_client(c, cid) for cid in args.client_ids))
+        if args.all:
+            # On ne va chercher le détail QUE des clients absents en local : la
+            # tâche planifiée tourne à vide (0 appel de détail) le reste du temps.
+            tous = await fetch_all_client_ids(c)
+            connus = existing_local_ids()
+            cibles = [cid for cid in tous if str(cid) not in connus]
+            logger.info("UCRM=%d clients, local=%d, manquants=%d",
+                        len(tous), len(connus), len(cibles))
+            if not cibles:
+                logger.info("Rien à synchroniser.")
+                return 0
+        else:
+            cibles = args.client_ids
+
+        results = await asyncio.gather(*(fetch_client(c, cid) for cid in cibles))
 
     rows: list[dict] = []
-    for cid, (client, services) in zip(args.client_ids, results):
+    for cid, (client, services) in zip(cibles, results):
         if client is None:
             logger.warning("UCRM client %d introuvable, skip", cid)
             continue
