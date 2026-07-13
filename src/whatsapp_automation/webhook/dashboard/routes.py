@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -23,7 +24,9 @@ from pydantic import BaseModel
 from ... import config
 from ...db import postgres as pg
 from ...jobqueue import store as queue_store
+from .. import job_builder
 from ..phone import normalize_mr_phone
+from ..validators import validate_crm_balance, validate_payment_balance
 from . import auth, events_db, samples, unknown_clients_store
 
 logger = logging.getLogger("whatsapp_automation.webhook.dashboard")
@@ -400,4 +403,276 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
             "rows_count": len(client_rows),
         },
         "message": "Client associé. Aucun paiement n'a été créé.",
+    }
+
+
+class _ConfirmFailure(Exception):
+    """Échec récupérable pendant la confirmation (Phase 4B-2) : la
+    réservation 'confirming' doit être relâchée vers 'associated' avant de
+    répondre à l'appelant (aucun Job n'a été construit/empilé)."""
+
+    def __init__(self, message: str, status_code: int = 409):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def _reconcile_via_existing_job(id: int, row: dict) -> Optional[dict]:
+    """Si un Job existe déjà en queue pour le txn_id de cet enregistrement
+    (actif ou terminé), le rattache et termine la confirmation. Ne crée
+    jamais de second Job. Retourne la réponse de succès, ou None si aucun Job
+    n'est trouvé (l'appelant doit alors décider quoi faire : la confirmation
+    est peut-être encore légitimement en cours, cf. `_recover_stale_or_reject`)."""
+    txn_id = row.get("txn_id")
+    if not txn_id:
+        return None
+    job_info = queue_store.find_job_by_txn(txn_id)
+    if not job_info:
+        return None
+    if not unknown_clients_store.mark_queued(id, job_info["job_id"]):
+        return None
+    return {
+        "ok": True,
+        "status": "queued",
+        "job_id": job_info["job_id"],
+        "reconciled": True,
+        "message": "Confirmation récupérée après incident : le paiement était déjà en file.",
+    }
+
+
+def _recover_stale_or_reject(id: int, row: dict) -> None:
+    """Un enregistrement 'confirming' sans Job retrouvé en queue (cf.
+    `_reconcile_via_existing_job`) est soit une confirmation concurrente
+    réellement en cours (relectures PostgreSQL/UCRM en vol — de vraies I/O
+    réseau, pas juste quelques microsecondes), soit un reliquat abandonné
+    (process tué, ou exception non gérée, survenu APRÈS
+    `reserve_for_confirmation()` mais AVANT `queue_store.enqueue()`).
+
+    On ne peut distinguer les deux qu'avec un délai : `updated_at` (posé par
+    `reserve_for_confirmation`) sert d'horodatage de réservation.
+    - Plus jeune que `config.UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS` : on
+      considère qu'une requête sœur est peut-être toujours active — on ne
+      touche JAMAIS l'enregistrement, on répond juste "réessayez".
+    - Plus vieux que ce délai : `release_stale_confirmation` tente une
+      restauration atomique confirming->associated (CAS incluant la
+      condition d'âge dans le même UPDATE, donc deux récupérations
+      concurrentes sur le même enregistrement stale ne peuvent pas toutes les
+      deux réussir).
+
+    Lève toujours HTTPException (jamais de retour) : ni le cas frais ni le
+    cas stale-récupéré n'aboutissent à une confirmation terminée dans CET
+    appel — l'admin doit relancer une nouvelle confirmation ensuite."""
+    age_seconds = time.time() - float(row.get("updated_at") or 0)
+    timeout = config.UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS
+
+    if age_seconds < timeout:
+        raise HTTPException(
+            status_code=409,
+            detail="Une confirmation est déjà en cours pour cet enregistrement. Réessayez dans quelques secondes.",
+        )
+
+    error_message = (
+        f"Confirmation expirée après {timeout}s sans Job retrouvé en queue — "
+        "remise en 'associated', vous pouvez réessayer."
+    )
+    released = unknown_clients_store.release_stale_confirmation(
+        id, error_message, min_age_seconds=timeout,
+    )
+    if released:
+        raise HTTPException(status_code=409, detail=error_message)
+
+    # rowcount == 0 : une autre requête a déjà transitionné cet enregistrement
+    # entre notre lecture initiale et cette tentative (soit elle l'a
+    # réconcilié vers 'queued', soit elle a gagné la course de restauration
+    # stale en premier). On ne réécrit rien à l'aveugle — juste 409 générique,
+    # cohérent dans les deux cas (le prochain appel de l'admin verra l'état à
+    # jour, que ce soit 'queued' ou 'associated').
+    raise HTTPException(
+        status_code=409,
+        detail="Une confirmation est déjà en cours pour cet enregistrement. Réessayez dans quelques secondes.",
+    )
+
+
+@router.post(
+    "/dashboard/api/unknown-clients/{id}/confirm",
+    dependencies=[Depends(auth.require_session)],
+)
+async def api_unknown_client_confirm(id: int):
+    """Phase 4B-2 : confirme un enregistrement 'associated' et empile un Job
+    de paiement complet en queue SQLite.
+
+    Ne fait JAMAIS : UCRM create_payment, MikroTik unblock, UltraMsg send,
+    écriture PostgreSQL — ces actions restent strictement réservées au
+    worker, qui consommera le Job une fois en file. Cette route ne fait que
+    relire PostgreSQL/UCRM à l'instant présent (jamais les données figées de
+    la Phase 3) et appeler `queue_store.enqueue()` exactement une fois.
+
+    Concurrence/crash : `reserve_for_confirmation` (CAS associated->confirming)
+    garantit qu'une seule confirmation avance à la fois pour cet
+    enregistrement. Si `enqueue()` renvoie None (dédup atomique par txn_id) ou
+    si un appel précédent a crashé entre l'enqueue et le mark_queued, on
+    inspecte la queue par txn_id et on rattache le Job existant plutôt que
+    d'en recréer un — jamais deux Jobs pour le même reçu. Si un enregistrement
+    reste bloqué en 'confirming' sans Job (crash — ou exception non gérée —
+    survenu avant même l'enqueue), il n'est récupéré vers 'associated' qu'après
+    `config.UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS` d'inactivité (cf.
+    `_recover_stale_or_reject`), pour ne jamais couper une confirmation sœur
+    encore légitimement en cours (relectures PostgreSQL/UCRM).
+    """
+    row = unknown_clients_store.get_by_id(id)
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    if row["status"] == "queued":
+        # Idempotent : une confirmation déjà aboutie ne recrée jamais de Job.
+        return {
+            "ok": True,
+            "status": "queued",
+            "job_id": row.get("job_id"),
+            "message": "Paiement déjà mis en file.",
+        }
+
+    if row["status"] == "confirming":
+        recovered = _reconcile_via_existing_job(id, row)
+        if recovered is not None:
+            return recovered
+        _recover_stale_or_reject(id, row)  # lève toujours HTTPException
+
+    if row["status"] != "associated":
+        raise HTTPException(
+            status_code=409, detail=f"Statut invalide pour confirmation : {row['status']}",
+        )
+
+    # Préconditions strictes — refusées AVANT toute réservation (aucun état
+    # SQLite touché si l'une d'elles échoue).
+    if not row.get("txn_id"):
+        raise HTTPException(status_code=409, detail="txn_id manquant sur ce reçu.")
+    amount = row.get("amount")
+    if not amount or amount <= 0:
+        raise HTTPException(status_code=409, detail="Montant manquant ou invalide.")
+    if not row.get("original_phone"):
+        raise HTTPException(status_code=409, detail="original_phone manquant.")
+    if not row.get("client_id"):
+        raise HTTPException(status_code=409, detail="client_id manquant (association requise).")
+    if not (row.get("entered_phone") or row.get("subscription_phone")):
+        raise HTTPException(status_code=409, detail="Numéro d'abonnement manquant.")
+    if row.get("job_id"):
+        raise HTTPException(status_code=409, detail="Déjà rattaché à un job existant.")
+
+    if not unknown_clients_store.reserve_for_confirmation(id):
+        # Course perdue contre une autre confirmation concurrente sur ce même id.
+        raise HTTPException(
+            status_code=409,
+            detail="Une autre confirmation est déjà en cours pour cet enregistrement.",
+        )
+
+    try:
+        try:
+            client_id_int = int(row["client_id"])
+        except (TypeError, ValueError):
+            raise _ConfirmFailure(f"client_id invalide: {row['client_id']!r}")
+
+        # Relecture PostgreSQL fraîche — jamais le MAC/statut figé en Phase 3.
+        # Un client peut avoir plusieurs abonnements : on récupère toutes les
+        # lignes (get_client_by_id retourne déjà TOUTES les lignes de cet
+        # idclient, cf. Phase 4B-1).
+        try:
+            client_rows = pg.get_client_by_id(client_id_int)
+        except Exception as exc:
+            raise _ConfirmFailure(f"PostgreSQL indisponible : {exc}"[:200], status_code=502)
+
+        if not client_rows:
+            raise _ConfirmFailure(
+                f"Client PostgreSQL introuvable (idclient={client_id_int}).", status_code=404,
+            )
+        client_row = client_rows[0]
+
+        # Relecture UCRM fraîche (helper partagé webhook/dashboard, avec retry).
+        details, services = await job_builder.fetch_ucrm_context(client_id_int)
+        crm_balance = int(details.get("balance") or 0) if details else None
+
+        valid_balance = validate_crm_balance(crm_balance)
+        if not valid_balance.ok:
+            raise _ConfirmFailure("UCRM injoignable.", status_code=502)
+
+        amount_paid = int(amount)
+        valid_overpay = validate_payment_balance(
+            amount_paid=amount_paid, crm_balance=crm_balance,
+            threshold=config.UNDERPAYMENT_TOLERANCE,
+        )
+        if not valid_overpay.ok:
+            raise _ConfirmFailure(f"Paiement refusé : {valid_overpay.reason}")
+
+        decision = job_builder.compute_unblock_plan(
+            client_row=client_row, client_rows=client_rows, details=details, services=services,
+            amount_paid=amount_paid, crm_balance=crm_balance,
+            threshold=config.UNDERPAYMENT_TOLERANCE,
+        )
+
+        original_phone = row["original_phone"]
+        job = job_builder.build_job(
+            client_row=client_row,
+            amount_paid=amount_paid,
+            txn_id=row["txn_id"],
+            date_heure=row.get("date_heure"),
+            template=row.get("operator") or "generic",
+            crm_balance=crm_balance,
+            unblock_macs=decision.unblock_macs,
+            # Règle métier Phase 4 : le reçu final part TOUJOURS au numéro qui
+            # a envoyé le paiement (original_phone) — client.phone ET
+            # source.wnum, contrairement au flux webhook où ils peuvent
+            # différer (cf. job_builder.build_job).
+            phone_for_worker=original_phone,
+            wnum=original_phone,
+            sample_id=row.get("sample_id") or "",
+        )
+    except _ConfirmFailure as fail:
+        unknown_clients_store.release_confirmation(id, fail.message)
+        raise HTTPException(status_code=fail.status_code, detail=fail.message)
+    except Exception as exc:
+        logger.exception("dashboard confirm id=%s : échec inattendu avant enqueue", id)
+        unknown_clients_store.release_confirmation(id, f"{type(exc).__name__}: {exc}"[:200])
+        raise HTTPException(status_code=500, detail="Échec interne, réessayez.")
+
+    internal_id = queue_store.enqueue(job)
+    if internal_id is None:
+        # Doublon détecté par l'index UNIQUE partiel de la queue (même txn_id
+        # déjà pending/processing/retry, ou déjà processed_payments). On
+        # inspecte la queue AVANT de décider : si un Job actif/terminé existe
+        # déjà pour ce txn_id, on le rattache (jamais un 2e Job) ; sinon on
+        # restaure 'associated' et on renvoie 409 (cas très improbable —
+        # `reserve_for_confirmation` protège déjà contre ce scénario pour CE
+        # même enregistrement, mais un autre enregistrement `numeros_introuvable`
+        # avec le même txn_id, ou un paiement déjà traité par le webhook,
+        # restent possibles).
+        job_info = queue_store.find_job_by_txn(job.payment.txn_id)
+        if job_info:
+            unknown_clients_store.mark_queued(id, job_info["job_id"])
+            return {
+                "ok": True,
+                "status": "queued",
+                "job_id": job_info["job_id"],
+                "reconciled": True,
+                "message": "Paiement déjà en file (rattaché à un job existant).",
+            }
+        unknown_clients_store.release_confirmation(
+            id, "Doublon détecté à l'enqueue mais introuvable en queue.",
+        )
+        raise HTTPException(status_code=409, detail="Doublon détecté, réessayez.")
+
+    unknown_clients_store.mark_queued(id, job.job_id)
+    logger.info(
+        "dashboard confirm id=%s job_id=%s client=%d txn=%s amount=%d unblock_macs=%s",
+        id, job.job_id, job.client.id, job.payment.txn_id, job.payment.amount_mru, job.unblock_macs,
+    )
+    return {
+        "ok": True,
+        "status": "queued",
+        "job_id": job.job_id,
+        "client_id": job.client.id,
+        "amount_paid": job.payment.amount_mru,
+        "crm_balance": crm_balance,
+        "should_unblock": job.payment.should_unblock,
+        "unblock_macs": job.unblock_macs,
+        "message": "Paiement mis en file. Le worker le traitera prochainement.",
     }

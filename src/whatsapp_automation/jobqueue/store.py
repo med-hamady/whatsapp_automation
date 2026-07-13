@@ -264,6 +264,32 @@ def get_job_by_payment_id(payment_id: str) -> Optional[Job]:
         return None
 
 
+def find_job_by_txn(txn_id: str) -> Optional[dict]:
+    """Retrouve le job le plus récent pour un txn_id, actif ou terminé avec
+    succès (pending/processing/retry/done) — exclut 'failed' (un job abandonné
+    n'empêche pas d'en recréer un, cf. `enqueue`).
+
+    Utilisé par la confirmation dashboard (Phase 4B-2) pour décider, quand
+    `enqueue()` renvoie None (dédup) ou quand une confirmation reste bloquée
+    en 'confirming' (crash entre l'enqueue et le mark_queued côté
+    numeros_introuvable), si un Job existe déjà pour ce reçu et peut être
+    rattaché sans jamais en créer un second. Retourne {"id", "job_id",
+    "status"} ou None."""
+    if not txn_id:
+        return None
+    with _connect() as conn:
+        cur = conn.execute(
+            """SELECT id, job_id, status FROM jobs
+               WHERE txn_id = ? AND status IN ('pending', 'processing', 'retry', 'done')
+               ORDER BY id DESC LIMIT 1""",
+            (txn_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {"id": row["id"], "job_id": row["job_id"], "status": row["status"]}
+
+
 def stats() -> dict:
     """Retourne {pending, processing, done, failed, retry} pour monitoring."""
     with _connect() as conn:

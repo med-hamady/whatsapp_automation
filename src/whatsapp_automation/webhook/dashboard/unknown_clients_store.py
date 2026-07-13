@@ -268,3 +268,109 @@ def mark_unknown_client_error(
             "SELECT * FROM numeros_introuvable WHERE id = ?", (id,)
         ).fetchone()
     return _row_to_dict(row) if row else None
+
+
+# Phase 4B-2 : transitions atomiques compare-and-set (CAS) autour de la
+# confirmation dashboard. Chaque helper utilise `WHERE status = ...` et
+# vérifie `rowcount` — c'est ce qui ferme la fenêtre de course entre deux
+# confirmations concurrentes du même enregistrement (un seul appel gagne la
+# transition ; l'autre voit rowcount=0 et sait qu'il a perdu la course, sans
+# transaction explicite nécessaire côté appelant : chaque UPDATE est atomique
+# en SQLite en autocommit).
+#
+# Pas de nouvelle valeur de `status` en dur dans un CHECK constraint (colonne
+# TEXT libre) : aucune migration de schéma requise pour introduire
+# 'confirming' et 'queued' en plus de 'pending'/'associated' existants.
+
+
+def reserve_for_confirmation(id: int, db_path: Optional[str] = None) -> bool:
+    """CAS : associated -> confirming. Retourne True si CET appel a gagné la
+    réservation (rowcount == 1). False si le statut n'était pas 'associated'
+    au moment de l'UPDATE (déjà en confirmation, déjà en file, ou pas encore
+    associé) — l'appelant doit alors refuser la confirmation (409) plutôt que
+    de continuer, pour ne jamais construire deux Jobs pour le même reçu."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """UPDATE numeros_introuvable
+               SET status = 'confirming', updated_at = ?
+               WHERE id = ? AND status = 'associated'""",
+            (now, id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def mark_queued(id: int, job_id: str, db_path: Optional[str] = None) -> bool:
+    """CAS : confirming -> queued. Persiste `job_id`, efface `error_message`
+    (un succès annule tout échec précédent). Retourne True si la transition a
+    eu lieu (rowcount == 1) — False si l'enregistrement n'était plus en
+    'confirming' (ex : appelé deux fois pour le même id)."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """UPDATE numeros_introuvable
+               SET status = 'queued', job_id = ?, error_message = NULL, updated_at = ?
+               WHERE id = ? AND status = 'confirming'""",
+            (job_id, now, id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def release_confirmation(id: int, error_message: str, db_path: Optional[str] = None) -> bool:
+    """CAS : confirming -> associated (échec récupérable : PostgreSQL/UCRM
+    indisponible, validation refusée, doublon introuvable en queue...).
+    Enregistre `error_message` pour affichage dashboard. Retourne True si la
+    transition a eu lieu (rowcount == 1).
+
+    Réservé à la requête qui DÉTIENT la réservation courante (celle qui a
+    elle-même appelé `reserve_for_confirmation()` puis échoué avant
+    `enqueue()`) : elle sait avec certitude qu'aucun Job n'a été empilé, donc
+    la libération immédiate est sûre, sans condition d'âge. Pour libérer un
+    enregistrement 'confirming' constaté par une AUTRE requête (qui ne sait
+    pas si l'original est toujours en cours), utiliser
+    `release_stale_confirmation` à la place."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """UPDATE numeros_introuvable
+               SET status = 'associated', error_message = ?, updated_at = ?
+               WHERE id = ? AND status = 'confirming'""",
+            (error_message, now, id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def release_stale_confirmation(
+    id: int, error_message: str, min_age_seconds: float, db_path: Optional[str] = None,
+) -> bool:
+    """CAS : confirming -> associated, mais UNIQUEMENT si la réservation est
+    plus vieille que `min_age_seconds` (comparé à `updated_at`, posé comme
+    horodatage de réservation par `reserve_for_confirmation`).
+
+    Entre la réservation et l'enqueue, la route confirm effectue de vraies
+    lectures PostgreSQL et UCRM (I/O réseau, pas microsecondes) : un
+    enregistrement 'confirming' récent peut donc appartenir à une requête
+    encore légitimement en cours. On ne le libère JAMAIS sans vérifier l'âge
+    — la condition `updated_at <= now - min_age_seconds` est évaluée dans le
+    MÊME UPDATE atomique que le changement de statut, donc deux tentatives de
+    récupération concurrentes sur le même enregistrement stale ne peuvent pas
+    toutes les deux réussir (rowcount == 1 pour une seule des deux).
+
+    Retourne True si la transition a eu lieu (donc si l'appelant a bien
+    gagné/effectué la récupération), False si l'enregistrement n'était pas
+    'confirming', ou pas encore assez vieux, ou déjà récupéré par un autre
+    appel concurrent."""
+    now = time.time()
+    cutoff = now - min_age_seconds
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """UPDATE numeros_introuvable
+               SET status = 'associated', error_message = ?, updated_at = ?
+               WHERE id = ? AND status = 'confirming' AND updated_at <= ?""",
+            (error_message, now, id, cutoff),
+        )
+        conn.commit()
+        return cur.rowcount == 1

@@ -118,6 +118,16 @@ ADMIN_API_KEY = _get("ADMIN_API_KEY", "")
 # Si ≤ seuil (y compris valeur négative = sur-paiement), on débloque.
 UNDERPAYMENT_TOLERANCE = int(_get("UNDERPAYMENT_TOLERANCE", "150"))
 
+# Délai (secondes) au-delà duquel une confirmation dashboard bloquée en
+# 'confirming' SANS Job retrouvé en queue est considérée abandonnée (crash
+# process, ou exception non gérée, survenu après reserve_for_confirmation()
+# mais avant que enqueue() n'ait pu être appelé) et peut être restaurée
+# automatiquement vers 'associated' pour permettre un nouvel essai. En
+# dessous de ce délai, une confirmation 'confirming' est traitée comme
+# potentiellement toujours active (lectures PostgreSQL/UCRM en vol) et n'est
+# JAMAIS relâchée par une requête tierce.
+UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS = int(_get("UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS", "300"))
+
 # Mot de passe d'accès au dashboard de supervision (/dashboard). Lecture seule.
 # Vide = dashboard désactivé : la page de login refuse toute connexion et les
 # endpoints /dashboard/api/* renvoient 401. À renseigner en prod via .env.
