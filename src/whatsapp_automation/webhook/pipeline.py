@@ -15,25 +15,19 @@ téléchargement et l'appel ai_ocr. Le worker ne fait jamais ces lookups.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
-
 from .. import config
-from ..models import Client, Job, Payment, Source
 from ..jobqueue import store as queue_store
 from ..db import postgres as pg
-from ..worker import ucrm, ultramsg
+from ..worker import ultramsg
+from . import job_builder
 from .ai_ocr_client import extract as ai_ocr_extract
 from .dashboard import unknown_clients_store
 from .image_downloader import download as download_image
 from .phone import parse_body_number, parse_from_field
 from .validators import (
-    plan_unblocks,
-    should_unblock_client,
     validate_client,
     validate_crm_balance,
     validate_document_type,
@@ -43,65 +37,7 @@ from .validators import (
 )
 
 
-# Code statut "Suspended" d'un service côté UCRM (cf. ucrm._UCRM_SERVICE_STATUS).
-UCRM_SERVICE_STATUS_SUSPENDED = 3
-
-
 logger = logging.getLogger("whatsapp_automation.webhook.pipeline")
-
-
-# Backoff entre tentatives UCRM get_balance. 3 essais au total ; ~4s max
-# d'attente cumulée avant d'abandonner. La requête tourne dans une asyncio
-# Task détachée (cf. app._safe_process) donc on ne bloque pas UltraMsg.
-UCRM_GET_BALANCE_DELAYS = (0, 1, 3)
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-async def _ucrm_with_retry(factory, label: str, client_id: int):
-    """Appelle une coroutine UCRM avec retry sur erreurs transitoires.
-
-    ``factory`` est une fonction sans argument renvoyant la coroutine à
-    chaque tentative (ex : ``lambda: ucrm.get_client_details(id)``).
-
-    Retourne le résultat, ou None si toutes les tentatives échouent (timeout,
-    réseau, 5xx) OU si UCRM renvoie une 4xx (erreur métier, inutile de retry).
-    """
-    last_exc: Optional[Exception] = None
-    for attempt, delay in enumerate(UCRM_GET_BALANCE_DELAYS, 1):
-        if delay:
-            await asyncio.sleep(delay)
-        try:
-            return await factory()
-        except httpx.HTTPStatusError as exc:
-            # 4xx → erreur métier (client introuvable, token invalide…)
-            # inutile de retry, on coupe court.
-            if 400 <= exc.response.status_code < 500:
-                logger.warning(
-                    "UCRM %s client=%d HTTP %d : abandon (pas de retry)",
-                    label, client_id, exc.response.status_code,
-                )
-                return None
-            last_exc = exc
-        except Exception as exc:
-            last_exc = exc
-        logger.warning(
-            "UCRM %s tentative %d/%d KO client=%d : %s: %r",
-            label, attempt, len(UCRM_GET_BALANCE_DELAYS), client_id,
-            type(last_exc).__name__, last_exc,
-        )
-    return None
-
-
-def _credit_from_details(details: dict) -> int:
-    """Extrait le crédit disponible (entier MRU, ≥ 0) d'un payload UCRM details."""
-    try:
-        credit = int(round(float(details.get("account_credit") or 0)))
-    except (TypeError, ValueError):
-        return 0
-    return max(0, credit)
 
 
 # Libellés humains pour les raisons d'échec qu'on notifie au support. Les
@@ -334,10 +270,7 @@ async def process(payload: dict) -> dict:
     # On skip uniquement si les DÉTAILS ont échoué (le solde est obligatoire).
     # Les services peuvent manquer (None) → on retombe sur le mode mono-abo.
     idclient = client_row["idclient"]
-    details, services = await asyncio.gather(
-        _ucrm_with_retry(lambda: ucrm.get_client_details(idclient), "get_client_details", idclient),
-        _ucrm_with_retry(lambda: ucrm.get_client_services(idclient), "get_client_services", idclient),
-    )
+    details, services = await job_builder.fetch_ucrm_context(idclient)
 
     crm_balance = int(details.get("balance") or 0) if details else None
 
@@ -372,92 +305,21 @@ async def process(payload: dict) -> dict:
         )
         return {"status": "skipped", "reason": valid_overpay.reason}
 
-    # Décision métier : quels abonnements débloquer ?
-    # Le client peut payer plusieurs abonnements (services UCRM) en un seul
-    # versement. On répartit `montant payé + crédit existant` sur les abos
-    # SUSPENDUS (status UCRM = 3), triés par prix croissant, et on débloque
-    # chaque abo couvert (cf. validators.plan_unblocks). Le reliquat reste en
-    # crédit côté UCRM.
-    existing_credit = _credit_from_details(details)
-    available = amount_paid + existing_credit
-
-    # MAC locaux (casse exacte de la DB) indexés pour rattacher chaque service
-    # UCRM à sa ligne locale — c'est la casse locale qu'on utilise en aval
-    # (update_client_status_by_mac filtre sur `mac` exact).
-    local_by_mac = {
-        (r.get("mac") or "").strip().lower(): r
-        for r in client_rows
-        if (r.get("mac") or "").strip()
-    }
-
-    suspended_services: list[dict] = []
-    for svc in services or []:
-        if svc.get("status") != UCRM_SERVICE_STATUS_SUSPENDED:
-            continue
-        svc_mac = (svc.get("mac") or "").strip()
-        local = local_by_mac.get(svc_mac.lower())
-        mac = local["mac"] if local else svc_mac
-        suspended_services.append({"mac": mac, "price": svc.get("price")})
-
-    if suspended_services:
-        plan = plan_unblocks(
-            suspended_services, available, config.UNDERPAYMENT_TOLERANCE,
-        )
-        unblock_macs = plan.macs
-        logger.info(
-            "répartition : abos_suspendus=%d dû_total=%d payé=%d crédit=%d "
-            "dispo=%d → débloqués=%d reliquat=%d macs=%s",
-            len(suspended_services), plan.total_due, amount_paid, existing_credit,
-            available, plan.covered_count, plan.remainder, unblock_macs,
-        )
-        # Filet : des abos suspendus existent mais plan_unblocks n'a rien pu
-        # débloquer — typiquement parce que les services UCRM n'ont pas de
-        # `macAddress` (ou pas de prix) exploitable, donc rien à répartir. Si
-        # le solde CRM agrégé est couvert par le paiement, on se rabat sur les
-        # MAC LOCAUX du client (source fiable, celle qu'utilise le worker pour
-        # débloquer via MikroTik). Sans ce filet, un paiement complet reste
-        # faussement classé "sous-paiement".
-        if not unblock_macs and should_unblock_client(
-            amount_paid=amount_paid,
-            crm_balance=crm_balance,
-            threshold=config.UNDERPAYMENT_TOLERANCE,
-        ):
-            unblock_macs = sorted({
-                (r.get("mac") or "").strip()
-                for r in client_rows
-                if (r.get("mac") or "").strip()
-                and not (r.get("mac") or "").strip().lower().startswith("pending-")
-            })
-            logger.info(
-                "abos suspendus sans MAC/prix UCRM exploitable mais solde couvert "
-                "(balance=%d payé=%d) → repli sur MAC locaux : %s",
-                crm_balance, amount_paid, unblock_macs,
-            )
-    else:
-        # Aucun service suspendu exploitable (services UCRM indispo, ou client
-        # déjà actif qui paie en avance) → repli sur la règle mono-abo
-        # historique basée sur le solde agrégé et le statut local.
-        was_suspended = client_row.get("statu") == 2
-        primary_mac = (client_row.get("mac") or "").strip()
-        fallback_unblock = (
-            was_suspended
-            and bool(primary_mac)
-            and should_unblock_client(
-                amount_paid=amount_paid,
-                crm_balance=crm_balance,
-                threshold=config.UNDERPAYMENT_TOLERANCE,
-            )
-        )
-        unblock_macs = [primary_mac] if fallback_unblock else []
-        logger.info(
-            "répartition (repli mono-abo) : statu=%s balance=%s payé=%s "
-            "services=%s → unblock=%s",
-            client_row.get("statu"), crm_balance, amount_paid,
-            "absent" if not services else "vide", bool(unblock_macs),
-        )
-
-    unblock = bool(unblock_macs)
-    was_suspended = client_row.get("statu") == 2
+    # Décision métier : quels abonnements débloquer ? Le client peut payer
+    # plusieurs abonnements (services UCRM) en un seul versement — cf.
+    # job_builder.compute_unblock_plan pour la règle complète (répartition,
+    # repli MAC local, repli mono-abo historique).
+    decision = job_builder.compute_unblock_plan(
+        client_row=client_row,
+        client_rows=client_rows,
+        details=details,
+        services=services,
+        amount_paid=amount_paid,
+        crm_balance=crm_balance,
+        threshold=config.UNDERPAYMENT_TOLERANCE,
+    )
+    unblock_macs = decision.unblock_macs
+    unblock = decision.unblock
 
     # Le worker débloquera en interrogeant MikroTik par IP au moment du
     # déblocage. On embarque donc l'IP dans le Job ; pas de lookup webhook
@@ -467,29 +329,17 @@ async def process(payload: dict) -> dict:
     client_phone = body_phone if (body_phone and not from_phone) else from_phone
 
     # Construction du Job complet — le worker n'aura à faire AUCUN lookup.
-    job = Job(
-        job_id=queue_store.new_job_id(),
-        client=Client(
-            id=client_row["idclient"],
-            phone=client_phone,
-            mac_address=client_row.get("mac"),
-            ip_address=client_row.get("ipaddress"),
-            current_status="suspended" if was_suspended else "active",
-        ),
-        payment=Payment(
-            amount_mru=amount_paid,
-            txn_id=txn_id or "",
-            date_heure=extracted.get("date_heure"),
-            operator=template,
-            crm_balance_before=crm_balance,
-            should_unblock=unblock,
-        ),
-        source=Source(
-            wnum=from_phone,
-            sample_id=sample_id,
-            received_at=_utc_now_iso(),
-        ),
+    job = job_builder.build_job(
+        client_row=client_row,
+        amount_paid=amount_paid,
+        txn_id=txn_id,
+        date_heure=extracted.get("date_heure"),
+        template=template,
+        crm_balance=crm_balance,
         unblock_macs=unblock_macs,
+        phone_for_worker=client_phone,
+        wnum=from_phone,
+        sample_id=sample_id,
     )
 
     internal_id = queue_store.enqueue(job)
