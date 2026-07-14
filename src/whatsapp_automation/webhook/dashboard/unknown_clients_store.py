@@ -222,15 +222,19 @@ def list_recent(
 def associate_unknown_client(
     id: int,
     *,
-    entered_phone: str,
+    entered_phone: Optional[str],
     subscription_phone: Optional[str],
     client_id: str,
     mac_address: Optional[str],
     db_path: Optional[str] = None,
 ) -> Optional[dict]:
-    """Phase 3 : rattache l'enregistrement au client PostgreSQL trouvé par le
-    numéro saisi par l'admin. N'écrit que dans cette base SQLite dédiée — ne
-    crée aucun paiement/Job, n'appelle ni UCRM ni MikroTik ni UltraMsg.
+    """Rattache l'enregistrement au client PostgreSQL identifié par l'admin.
+    N'écrit que dans cette base SQLite dédiée — ne crée aucun paiement/Job,
+    n'appelle ni UCRM ni MikroTik ni UltraMsg.
+
+    `entered_phone` est None depuis le passage à l'association par identifiant
+    CRM (l'admin ne saisit plus de téléphone) ; la colonne est conservée pour
+    la lisibilité des enregistrements historiques Phase 3.
 
     status pending -> associated. `error_message` est effacé (une nouvelle
     tentative réussie annule un échec précédent éventuel)."""

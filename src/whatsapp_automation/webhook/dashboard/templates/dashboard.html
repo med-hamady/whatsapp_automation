@@ -234,48 +234,46 @@
   <div class="modal-overlay" id="ucModal" style="display:none;">
     <div class="modal" style="width: min(720px, 96vw);">
       <div class="modal-head">
-        <h3>Numéro client introuvable</h3>
+        <h3>Association d'un reçu à un client CRM</h3>
         <button id="ucClose" title="Fermer">✕</button>
       </div>
       <div style="padding: 20px;">
+
+        <div id="ucAssocBox">
+          <div class="explain">
+            Entrez l'identifiant CRM du client concerné.<br><br>
+            Cet identifiant permettra d'associer ce reçu au bon client.<br><br>
+            Une fois cette association effectuée, le système pourra reconnaître
+            automatiquement les prochains paiements envoyés depuis ce même numéro
+            WhatsApp afin de réduire les cas de clients introuvables.<br><br>
+            Veuillez vérifier les informations avant de continuer.
+          </div>
+          <div id="ucTxnWarn"></div>
+          <label class="muted" style="font-size:12px; display:block; margin-top:14px;">
+            Identifiant CRM du client
+          </label>
+          <div class="uc-payer-form" style="display:flex; gap:8px; margin-top:6px;">
+            <input id="ucCrmInput" type="text" inputmode="numeric" placeholder="Ex : 48213" maxlength="12">
+            <button id="ucVerifyBtn" class="btn-pay">Vérifier</button>
+          </div>
+          <div id="ucVerifyMsg" style="margin-top:10px;"></div>
+          <div id="ucClientPreview" style="display:none;"></div>
+        </div>
+
+        <h4>Informations du reçu</h4>
         <div class="meta" id="ucMeta"></div>
-        <div id="ucTxnWarn"></div>
         <h4>Capture reçue</h4>
         <div id="ucImageWrap"></div>
         <h4>Texte OCR brut</h4>
         <div id="ucRaw" class="muted" style="font-size:12px; white-space:pre-wrap; word-break:break-word;"></div>
 
-        <div id="ucPayerBox" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px;">
-          <button id="ucPayerBtn" class="btn-pay">Payer</button>
-          <div id="ucPayerForm" class="uc-payer-form" style="display:none;">
-            <div class="explain">
-              Cette étape associe le reçu au client PostgreSQL trouvé via le numéro saisi
-              ci-dessous. Elle ne crée <b>ni paiement ni tâche</b> — le déblocage réel passera,
-              dans une phase suivante, par la file d'attente existante après confirmation.
-              La réponse WhatsApp finale sera toujours envoyée au numéro qui a transmis le
-              reçu, pas nécessairement au numéro de l'abonnement.
-            </div>
-            <label class="muted" style="font-size:12px; display:block; margin-top:12px;">
-              Numéro de téléphone du client (8 chiffres, ex. 37697850)
-            </label>
-            <div style="display:flex; gap:8px; margin-top:6px;">
-              <input id="ucPhoneInput" type="text" placeholder="37697850 ou +22237697850" maxlength="20">
-              <button id="ucPhoneSubmit" class="btn-pay">Valider</button>
-            </div>
-            <div id="ucPhoneMsg" style="margin-top:10px;"></div>
-          </div>
+        <div id="ucAssocActions" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px; display:none;">
+          <button id="ucAssociateBtn" class="btn-pay">Associer ce client</button>
+          <div id="ucAssocMsg" style="margin-top:10px;"></div>
         </div>
 
         <div id="ucConfirmBox" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px; display:none;">
-          <button id="ucConfirmBtn" class="btn-pay">Confirmer le paiement</button>
-          <div id="ucConfirmWarn" class="uc-payer-form" style="display:none;">
-            <div class="warn-box" id="ucConfirmWarnText"></div>
-            <div style="display:flex; gap:8px; margin-top:12px;">
-              <button id="ucConfirmYes" class="btn-pay">Oui, confirmer</button>
-              <button id="ucConfirmCancel">Annuler</button>
-            </div>
-            <div id="ucConfirmMsg" style="margin-top:10px;"></div>
-          </div>
+          <button id="ucOpenConfirmBtn" class="btn-pay">Confirmer le paiement</button>
         </div>
 
         <div id="ucConfirmingBox" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px; display:none;">
@@ -285,6 +283,30 @@
         <div id="ucQueuedBox" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px; display:none;">
           <div class="ok-box" id="ucQueuedText"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="ucConfirmModal" style="display:none; z-index:60;">
+    <div class="modal" style="width: min(480px, 94vw);">
+      <div class="modal-head">
+        <h3>Confirmer le paiement</h3>
+        <button id="ucConfirmModalClose" title="Fermer">✕</button>
+      </div>
+      <div style="padding: 20px;">
+        <div class="meta" id="ucConfirmSummary"></div>
+        <div class="warn-box">
+          Vous êtes sur le point de confirmer ce paiement.<br>
+          Le paiement sera placé dans la file d'attente.<br>
+          Les abonnements couverts par le montant pourront être réactivés automatiquement.<br>
+          Le reçu final sera envoyé au numéro WhatsApp ayant transmis la capture.<br>
+          Cette action est volontaire.
+        </div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+          <button id="ucConfirmModalCancel">Annuler</button>
+          <button id="ucConfirmModalYes" class="btn-pay">Confirmer le paiement</button>
+        </div>
+        <div id="ucConfirmModalMsg" style="margin-top:10px;"></div>
       </div>
     </div>
   </div>
@@ -602,7 +624,8 @@
       if (e.target.id === "modal") closeModal();
     });
 
-    // --- Numéros clients introuvables (association Phase 3 + confirmation Phase 4B-2) ---
+    // --- Numéros clients introuvables (association par identifiant CRM +
+    // double confirmation avant mise en file) ---
     let lastUnknownClients = [];
 
     const UC_STATUS_FR = {
@@ -619,7 +642,7 @@
 
     function ucActionCell(r) {
       if (r.status === "pending") {
-        return `<button class="btn-pay uc-pay-btn" data-id="${r.id}">Payer</button>`;
+        return `<button class="btn-pay uc-assoc-btn" data-id="${r.id}">Associer</button>`;
       }
       if (r.status === "associated") {
         return `<button class="btn-pay uc-confirm-btn" data-id="${r.id}">Confirmer le paiement</button>`;
@@ -656,38 +679,40 @@
         || `<tr><td colspan="7" class="muted">Aucun numéro client introuvable.</td></tr>`;
     }
 
-    function resetUcPayerForm() {
-      document.getElementById("ucPayerForm").style.display = "none";
-      document.getElementById("ucPhoneInput").value = "";
-      document.getElementById("ucPhoneMsg").innerHTML = "";
+    function resetUcAssocForm() {
+      document.getElementById("ucCrmInput").value = "";
+      document.getElementById("ucCrmInput").disabled = false;
+      document.getElementById("ucVerifyBtn").disabled = false;
+      document.getElementById("ucVerifyMsg").innerHTML = "";
       document.getElementById("ucTxnWarn").innerHTML = "";
-      document.getElementById("ucPhoneSubmit").disabled = false;
-      document.getElementById("ucPhoneInput").disabled = false;
-    }
-
-    function resetUcConfirmForm() {
-      document.getElementById("ucConfirmWarn").style.display = "none";
-      document.getElementById("ucConfirmMsg").innerHTML = "";
-      document.getElementById("ucConfirmYes").disabled = false;
-      document.getElementById("ucConfirmCancel").disabled = false;
+      document.getElementById("ucClientPreview").style.display = "none";
+      document.getElementById("ucClientPreview").innerHTML = "";
+      document.getElementById("ucAssocActions").style.display = "none";
+      document.getElementById("ucAssociateBtn").disabled = false;
+      document.getElementById("ucAssocMsg").innerHTML = "";
+      verifiedCrmClient = null;
     }
 
     function closeUcModal() { document.getElementById("ucModal").style.display = "none"; }
+    function closeUcConfirmModal() { document.getElementById("ucConfirmModal").style.display = "none"; }
 
-    let currentUcId = null;
+    let currentUcId = null;      // enregistrement numeros_introuvable ouvert
+    let currentUcDetail = null;  // détail chargé de cet enregistrement
+    let verifiedCrmClient = null; // client CRM vérifié (étape « Vérifier »), pas encore associé
 
     async function openUnknownClientDetail(id, mode) {
       currentUcId = id;
+      currentUcDetail = null;
       document.getElementById("ucModal").style.display = "flex";
       document.getElementById("ucMeta").innerHTML = `<div class="muted">Chargement…</div>`;
       document.getElementById("ucImageWrap").innerHTML = "";
       document.getElementById("ucRaw").textContent = "";
-      resetUcPayerForm();
-      resetUcConfirmForm();
+      resetUcAssocForm();
 
       let d;
       try { d = await api(`/api/unknown-clients/${id}`); }
       catch (_) { closeUcModal(); return; }
+      currentUcDetail = d;
 
       document.getElementById("ucMeta").innerHTML = [
         `<div><b>Reçu le :</b> ${d.date_heure || "—"}</div>`,
@@ -698,14 +723,13 @@
         `<div><b>Transaction :</b> ${d.txn_id || `<span class="muted">manquante</span>`}</div>`,
         `<div><b>Statut :</b> ${ucStatusBadge(d.status)}</div>`,
         (d.status === "associated" || d.status === "confirming" || d.status === "queued")
-          ? `<div><b>Client associé :</b> ${d.client_id ?? "—"}
-             (MAC ${d.mac_address || "—"}, tél. abonnement ${d.subscription_phone || "—"})</div>` : "",
+          ? `<div><b>Client associé (identifiant CRM) :</b> ${d.client_id ?? "—"}</div>` : "",
         d.status === "queued" ? `<div><b>Job :</b> ${d.job_id || "—"}</div>` : "",
       ].join("");
 
       document.getElementById("ucTxnWarn").innerHTML = d.txn_id ? "" : `<div class="warn-box">
         ⚠️ Transaction (txn_id) manquante sur ce reçu : une association / un paiement
-        automatique ne peut pas être fait en toute sécurité sans elle. L'action « Payer »
+        automatique ne peut pas être fait en toute sécurité sans elle. L'association
         reste désactivée pour cet enregistrement.</div>`;
 
       if (d.sample_date && d.sample_sid) {
@@ -718,30 +742,21 @@
       }
       document.getElementById("ucRaw").textContent = d.raw_text || "—";
 
-      document.getElementById("ucPayerBox").style.display = d.status === "pending" ? "" : "none";
-      document.getElementById("ucPhoneSubmit").disabled = !d.txn_id;
-      document.getElementById("ucPhoneInput").disabled = !d.txn_id;
+      document.getElementById("ucAssocBox").style.display = d.status === "pending" ? "" : "none";
+      document.getElementById("ucCrmInput").disabled = !d.txn_id;
+      document.getElementById("ucVerifyBtn").disabled = !d.txn_id;
 
       document.getElementById("ucConfirmBox").style.display = d.status === "associated" ? "" : "none";
       document.getElementById("ucConfirmingBox").style.display = d.status === "confirming" ? "" : "none";
       document.getElementById("ucQueuedBox").style.display = d.status === "queued" ? "" : "none";
 
-      if (d.status === "associated") {
-        document.getElementById("ucConfirmWarnText").textContent =
-          `Cette action mettra le paiement en file. Le worker pourra ensuite créer le ` +
-          `paiement UCRM, débloquer le client si nécessaire et envoyer le reçu à ` +
-          `+222${d.original_phone || ""}.`;
-      }
       if (d.status === "queued") {
         document.getElementById("ucQueuedText").innerHTML =
           `Paiement mis en file. Le worker le traitera prochainement.<br><b>Job :</b> ${d.job_id || "—"}`;
       }
 
-      if (mode === "payer" && d.status === "pending") {
-        document.getElementById("ucPayerForm").style.display = "";
-      }
       if (mode === "confirm" && d.status === "associated") {
-        document.getElementById("ucConfirmWarn").style.display = "";
+        openUcConfirmModal(await ucConfirmInfoFromDetail(d));
       }
     }
 
@@ -749,33 +764,158 @@
       const tr = e.target.closest("tr.uc-row");
       if (!tr) return;
       let mode = null;
-      if (e.target.closest(".uc-pay-btn")) mode = "payer";
+      if (e.target.closest(".uc-assoc-btn")) mode = "associer";
       else if (e.target.closest(".uc-confirm-btn")) mode = "confirm";
       openUnknownClientDetail(+tr.dataset.id, mode);
     });
 
-    document.getElementById("ucPayerBtn").addEventListener("click", () => {
-      const form = document.getElementById("ucPayerForm");
-      form.style.display = form.style.display === "none" ? "" : "none";
+    // --- Étape « Vérifier » : lecture seule (GET /api/client), aucun état
+    // modifié — l'admin contrôle le client avant « Associer ce client ».
+    function renderCrmPreview(c) {
+      const stBadge = (s) => s === 2 ? `<span class="badge b-refused">Suspendu</span>`
+        : (s === 0 ? `<span class="badge b-ok">Actif</span>` : `<span class="muted">—</span>`);
+      const subs = c.subscriptions || [];
+      const rows = subs.map(s => `<tr>
+        <td><code>${s.mac || "—"}</code></td>
+        <td>${s.ip || "—"}</td>
+        <td>${stBadge(s.statu)}</td>
+        <td class="muted">${s.info || "—"}</td>
+      </tr>`).join("");
+      return `<div class="status-box" style="margin-top:14px;">
+        <div class="t">Client trouvé — vérifiez avant de continuer</div>
+        <div class="meta">
+          <div><b>Identifiant CRM :</b> ${c.id}</div>
+          <div><b>Nom :</b> ${c.name || "—"}</div>
+          <div><b>Abonnements :</b> ${subs.length}</div>
+        </div>
+        <table style="margin-top:10px;">
+          <thead><tr><th>MAC</th><th>IP</th><th>Statut</th><th>Information</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    }
+
+    document.getElementById("ucVerifyBtn").addEventListener("click", async () => {
+      const btn = document.getElementById("ucVerifyBtn");
+      const input = document.getElementById("ucCrmInput");
+      const msg = document.getElementById("ucVerifyMsg");
+      const preview = document.getElementById("ucClientPreview");
+      const actions = document.getElementById("ucAssocActions");
+      const raw = (input.value || "").trim();
+      verifiedCrmClient = null;
+      preview.style.display = "none"; preview.innerHTML = "";
+      actions.style.display = "none";
+      if (!/^\d+$/.test(raw) || parseInt(raw, 10) <= 0) {
+        msg.innerHTML = `<div class="warn-box">Identifiant CRM invalide. Entier positif attendu (ex : 48213).</div>`;
+        return;
+      }
+      btn.disabled = true;
+      msg.innerHTML = `<div class="muted">Recherche du client en cours…</div>`;
+
+      let c;
+      try { c = await api(`/api/client?id=${parseInt(raw, 10)}`); }
+      catch (_) {
+        msg.innerHTML = `<div class="warn-box">Erreur réseau. Réessayez.</div>`;
+        btn.disabled = false;
+        return;
+      }
+      btn.disabled = false;
+
+      const subs = (c.found && c.client && c.client.subscriptions) || [];
+      if (!c.found || !subs.length) {
+        msg.innerHTML = `<div class="warn-box">Aucun client trouvé pour cet identifiant CRM.</div>`;
+        return;
+      }
+      verifiedCrmClient = c.client;
+      msg.innerHTML = "";
+      preview.innerHTML = renderCrmPreview(c.client);
+      preview.style.display = "";
+      actions.style.display = "";
     });
 
-    // --- Confirmation de paiement (Phase 4B-2) : 2e clic explicite requis
-    // avant l'appel réseau — le premier clic ouvre juste l'avertissement.
-    document.getElementById("ucConfirmBtn").addEventListener("click", () => {
-      const warn = document.getElementById("ucConfirmWarn");
-      warn.style.display = warn.style.display === "none" ? "" : "none";
+    // --- « Associer ce client » : association réelle (écrit dans SQLite
+    // uniquement — aucun paiement créé), puis ouverture de la double
+    // confirmation.
+    document.getElementById("ucAssociateBtn").addEventListener("click", async () => {
+      if (!currentUcId || !verifiedCrmClient) return;
+      const btn = document.getElementById("ucAssociateBtn");
+      const msg = document.getElementById("ucAssocMsg");
+      btn.disabled = true;
+      msg.innerHTML = `<div class="muted">Association en cours…</div>`;
+
+      let res;
+      try {
+        res = await apiPost(`/api/unknown-clients/${currentUcId}/associate`, {
+          crm_client_id: String(verifiedCrmClient.id),
+        });
+      } catch (_) {
+        msg.innerHTML = `<div class="warn-box">Erreur réseau. Réessayez.</div>`;
+        btn.disabled = false;
+        return;
+      }
+
+      if (!res.ok) {
+        msg.innerHTML = `<div class="warn-box">${res.body.detail || "Association impossible."}</div>`;
+        btn.disabled = false;
+        return;
+      }
+
+      const p = res.body.client_preview || {};
+      msg.innerHTML = `<div class="ok-box">${res.body.message || "Client associé."}</div>`;
+      loadUnknownClients();
+      const d = currentUcDetail || {};
+      openUcConfirmModal({
+        client_id: p.client_id,
+        original_phone: d.original_phone,
+        amount: d.amount,
+        txn_id: d.txn_id,
+        operator: d.operator,
+        subscriptions_count: p.subscriptions_count,
+      });
     });
 
-    document.getElementById("ucConfirmCancel").addEventListener("click", () => {
-      document.getElementById("ucConfirmWarn").style.display = "none";
-      document.getElementById("ucConfirmMsg").innerHTML = "";
-    });
+    // --- Double confirmation (petit modal centré) : seul « Confirmer le
+    // paiement » de CE modal appelle /confirm — jamais window.confirm().
+    async function ucConfirmInfoFromDetail(d) {
+      // Compte d'abonnements récupéré en lecture seule (best-effort : "—" si
+      // la fiche client est momentanément indisponible).
+      let count = null;
+      if (d.client_id) {
+        try {
+          const c = await api(`/api/client?id=${parseInt(d.client_id, 10)}`);
+          if (c.found && c.client) count = (c.client.subscriptions || []).length;
+        } catch (_) { /* affichage best-effort */ }
+      }
+      return {
+        client_id: d.client_id,
+        original_phone: d.original_phone,
+        amount: d.amount,
+        txn_id: d.txn_id,
+        operator: d.operator,
+        subscriptions_count: count,
+      };
+    }
 
-    document.getElementById("ucConfirmYes").addEventListener("click", async () => {
+    function openUcConfirmModal(info) {
+      document.getElementById("ucConfirmSummary").innerHTML = [
+        `<div><b>Identifiant CRM :</b> ${info.client_id ?? "—"}</div>`,
+        `<div><b>Numéro WhatsApp :</b> ${info.original_phone || "—"}</div>`,
+        `<div><b>Montant :</b> ${info.amount != null ? info.amount + " MRU" : "—"}</div>`,
+        `<div><b>Transaction :</b> ${info.txn_id || "—"}</div>`,
+        `<div><b>Opérateur :</b> ${info.operator || "—"}</div>`,
+        `<div><b>Abonnements :</b> ${info.subscriptions_count ?? "—"}</div>`,
+      ].join("");
+      document.getElementById("ucConfirmModalMsg").innerHTML = "";
+      document.getElementById("ucConfirmModalYes").disabled = false;
+      document.getElementById("ucConfirmModalCancel").disabled = false;
+      document.getElementById("ucConfirmModal").style.display = "flex";
+    }
+
+    document.getElementById("ucConfirmModalYes").addEventListener("click", async () => {
       if (!currentUcId) return;
-      const yesBtn = document.getElementById("ucConfirmYes");
-      const cancelBtn = document.getElementById("ucConfirmCancel");
-      const msg = document.getElementById("ucConfirmMsg");
+      const yesBtn = document.getElementById("ucConfirmModalYes");
+      const cancelBtn = document.getElementById("ucConfirmModalCancel");
+      const msg = document.getElementById("ucConfirmModalMsg");
       yesBtn.disabled = true; cancelBtn.disabled = true;
       msg.innerHTML = `<div class="muted">Mise en file en cours…</div>`;
 
@@ -796,61 +936,22 @@
 
       msg.innerHTML = `<div class="ok-box">${res.body.message || "Paiement mis en file."}
         ${res.body.job_id ? `<br><b>Job :</b> ${res.body.job_id}` : ""}</div>`;
-      // Succès : on rafraîchit la liste (le statut passe à 'queued', la ligne
-      // n'a plus de bouton d'action) sans jamais démarrer le worker ici.
+      // Succès : on rafraîchit la liste et le modal de détail (statut
+      // 'queued') sans jamais démarrer le worker ici.
       loadUnknownClients();
+      openUnknownClientDetail(currentUcId, null);
     });
 
-    // Normalise un numéro mauritanien saisi ("+222 37 69 78 50", "22237697850"…) → 8 chiffres.
-    function normalizePhoneMR(raw) {
-      let d = (raw || "").trim().replace(/[^\d]/g, "");
-      if (d.startsWith("222") && d.length > 8) d = d.slice(3);
-      return d;
-    }
-    function isValidPhoneMR(raw) { return /^\d{8}$/.test(normalizePhoneMR(raw)); }
+    document.getElementById("ucConfirmModalCancel").addEventListener("click", closeUcConfirmModal);
+    document.getElementById("ucConfirmModalClose").addEventListener("click", closeUcConfirmModal);
+    document.getElementById("ucConfirmModal").addEventListener("click", (e) => {
+      if (e.target.id === "ucConfirmModal") closeUcConfirmModal();
+    });
 
-    document.getElementById("ucPhoneSubmit").addEventListener("click", async () => {
-      const btn = document.getElementById("ucPhoneSubmit");
-      const input = document.getElementById("ucPhoneInput");
-      const msg = document.getElementById("ucPhoneMsg");
-      if (!isValidPhoneMR(input.value)) {
-        msg.innerHTML = `<div class="warn-box">Numéro invalide. Format attendu : 8 chiffres
-          (ex. 37697850) ou +222XXXXXXXX.</div>`;
-        return;
-      }
-      if (!currentUcId) return;
-      const normalized = normalizePhoneMR(input.value);
-      btn.disabled = true; input.disabled = true;
-      msg.innerHTML = `<div class="muted">Recherche du client en cours…</div>`;
-
-      let res;
-      try {
-        res = await apiPost(`/api/unknown-clients/${currentUcId}/associate`, {
-          entered_phone: normalized,
-        });
-      } catch (_) {
-        msg.innerHTML = `<div class="warn-box">Erreur réseau. Réessayez.</div>`;
-        btn.disabled = false; input.disabled = false;
-        return;
-      }
-
-      if (!res.ok) {
-        msg.innerHTML = `<div class="warn-box">${res.body.detail || "Association impossible."}</div>`;
-        btn.disabled = false; input.disabled = false;
-        return;
-      }
-
-      const p = res.body.client_preview || {};
-      msg.innerHTML = `<div class="ok-box">${res.body.message}<br>
-        <b>Client :</b> ${p.client_id ?? "—"} · <b>MAC :</b> ${p.mac_address || "—"}
-        · <b>Tél. abonnement :</b> ${p.subscription_phone || "—"}
-        ${p.status ? ` · <b>Statut :</b> ${p.status}` : ""}
-        ${p.rows_count > 1 ? `<br><span class="muted" style="font-size:12px;">${p.rows_count} abonnements trouvés pour ce client — un seul retenu pour cet aperçu.</span>` : ""}
-        </div>`;
-      // Association faite : on garde le formulaire désactivé (pas de nouvelle
-      // saisie sur ce même enregistrement) et on rafraîchit la liste (le
-      // statut n'est plus "pending", la ligne disparaît de la table).
-      loadUnknownClients();
+    // Bouton « Confirmer le paiement » du modal de détail (statut 'associated').
+    document.getElementById("ucOpenConfirmBtn").addEventListener("click", async () => {
+      if (!currentUcDetail) return;
+      openUcConfirmModal(await ucConfirmInfoFromDetail(currentUcDetail));
     });
 
     document.getElementById("ucClose").addEventListener("click", closeUcModal);
@@ -859,7 +960,7 @@
     });
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") { closeModal(); closeUcModal(); }
+      if (e.key === "Escape") { closeModal(); closeUcConfirmModal(); closeUcModal(); }
     });
 
     async function refreshAll() {

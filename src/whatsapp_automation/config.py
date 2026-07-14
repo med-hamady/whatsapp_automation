@@ -94,6 +94,17 @@ UNKNOWN_CLIENTS_DB_PATH = _get(
     str(_DATA_DIR / "unknown_clients.db"),
 )
 
+# Base SQLite des correspondances numéro WhatsApp → idclient CRM apprises via
+# le dashboard (reçu "client introuvable" rattaché manuellement par identifiant
+# CRM). Écrite par le dashboard UNIQUEMENT quand le paiement confirmé atteint
+# le statut 'queued' (jamais à la simple association) ; lue par le webhook
+# comme REPLI uniquement, quand le lookup PostgreSQL par téléphone n'a rien
+# donné — elle ne remplace jamais le lookup normal.
+WHATSAPP_CRM_MAPPINGS_DB_PATH = _get(
+    "WHATSAPP_CRM_MAPPINGS_DB_PATH",
+    str(_DATA_DIR / "whatsapp_crm_mappings.db"),
+)
+
 N_WORKERS = int(_get("N_WORKERS", "2"))
 WORKER_POLL_INTERVAL = float(_get("WORKER_POLL_INTERVAL", "1.0"))
 

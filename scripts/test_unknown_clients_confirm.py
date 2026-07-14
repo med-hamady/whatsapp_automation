@@ -5,7 +5,8 @@ Vérifie :
   2. id inconnu -> 404 ;
   3. statut 'pending' -> 409 ;
   4. txn_id manquant -> 409 ;
-  5. amount/original_phone/client_id manquants -> 409 chacun ;
+  5. amount/original_phone/client_id manquants -> 409 chacun ; entered_phone/
+     subscription_phone absents (association par identifiant CRM) -> accepté ;
   6. réservation atomique (reserve_for_confirmation) empêche 2 confirmations
      concurrentes du même enregistrement ;
   7. les lignes PostgreSQL relues sont FRAÎCHES (pas le MAC figé en Phase 3) ;
@@ -33,7 +34,13 @@ Vérifie :
       la logique de staleness) ;
   22. récupération stale concurrente (release_stale_confirmation) reste
       atomique : N tentatives simultanées sur le même enregistrement stale,
-      une seule réussit.
+      une seule réussit ;
+  23. correspondance whatsapp_crm_mappings (décision Ali) : écrite UNIQUEMENT
+      quand l'enregistrement atteint 'queued' — sur les 4 chemins (succès
+      nominal, réponse idempotente déjà-en-file qui répare une mémoire
+      manquante, réconciliation doublon txn_id, récupération après crash) —
+      et JAMAIS sur un refus (gates 409), un confirming frais, ou une
+      restauration stale.
 
 100% local : bases SQLite temporaires, PostgreSQL et UCRM entièrement mockés,
 aucun réseau réel, aucune écriture PostgreSQL, worker jamais démarré.
@@ -59,6 +66,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 _TMP = Path(tempfile.mkdtemp(prefix="uc_confirm_test_"))
 os.environ["UNKNOWN_CLIENTS_DB_PATH"] = str(_TMP / "unknown_clients.db")
+os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"] = str(_TMP / "whatsapp_crm_mappings.db")
 os.environ["EVENTS_DB_PATH"] = str(_TMP / "events.db")
 os.environ["QUEUE_DB_PATH"] = str(_TMP / "queue.db")
 os.environ["DASHBOARD_PASSWORD"] = "test-password-phase4b2"
@@ -70,12 +78,26 @@ os.environ["UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS"] = "5"
 from whatsapp_automation import config  # noqa: E402
 from whatsapp_automation.db import postgres as pg  # noqa: E402
 from whatsapp_automation.jobqueue import store as queue_store  # noqa: E402
+from whatsapp_automation.webhook import crm_mappings  # noqa: E402
 from whatsapp_automation.webhook.dashboard import unknown_clients_store as store  # noqa: E402
 from whatsapp_automation.worker import mikrotik, ucrm, ultramsg  # noqa: E402
 
 CONFIRM_TIMEOUT = config.UNKNOWN_CLIENT_CONFIRM_TIMEOUT_SECONDS
 
 DB = os.environ["UNKNOWN_CLIENTS_DB_PATH"]
+MAP_DB = os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"]
+
+
+def _active_mapping(phone: str):
+    return crm_mappings.get_active_mapping(phone, db_path=MAP_DB)
+
+
+def _delete_mappings(phone: str) -> None:
+    """Supprime les correspondances d'un numéro (simule une mémoire perdue,
+    ex : crash juste après mark_queued mais avant l'écriture du mapping)."""
+    with sqlite3.connect(MAP_DB) as conn:
+        conn.execute("DELETE FROM whatsapp_crm_mappings WHERE whatsapp_phone = ?", (phone,))
+        conn.commit()
 
 passed = failed = 0
 _sample_seq = 0
@@ -259,11 +281,34 @@ def test_auth_and_basic_status_gates() -> None:
         r = client.post(f"/dashboard/api/unknown-clients/{no_client_id}/confirm")
         check("5d. client_id manquant -> 409", r.status_code == 409)
 
-        # 5e. entered_phone/subscription_phone manquants -> 409.
+        # Toutes les confirmations refusées ci-dessus (gates 3→5d, même
+        # original_phone par défaut) ne doivent avoir écrit AUCUNE
+        # correspondance WhatsApp -> CRM : la mémoire n'est écrite qu'au
+        # statut 'queued'.
+        check("gates refusées : aucune correspondance créée avant 'queued'",
+              _active_mapping("37600001") is None)
+
+        # 5e. entered_phone/subscription_phone absents (association par
+        # identifiant CRM) : la confirmation est ACCEPTÉE — le Job n'en dépend
+        # pas (client_id pilote PostgreSQL/UCRM, original_phone la réponse
+        # WhatsApp). C'était un 409 du temps de l'association par téléphone.
         no_sub_phone = seed_associated(idclient=707, txn_id="TXNSUBP")
         _force_field(no_sub_phone, entered_phone=None, subscription_phone=None)
+        FAKE_PG_BY_ID[707] = [client_row(707, "SUBP:MAC:01", statu=2)]
+        FAKE_UCRM_DETAILS[707] = {"balance": 1500, "account_credit": 0}
+        FAKE_UCRM_SERVICES[707] = [svc("SUBP:MAC:01", 1500)]
         r = client.post(f"/dashboard/api/unknown-clients/{no_sub_phone}/confirm")
-        check("5e. entered_phone/subscription_phone manquants -> 409", r.status_code == 409)
+        check("5e. sans entered/subscription_phone (association CRM) -> confirm 200",
+              r.status_code == 200, r.text)
+        # Draine le job enqueued par 5e (sinon le claim_next des tests
+        # suivants — FIFO — récupérerait ce job au lieu du leur).
+        drained = queue_store.claim_next("phase-gates-drain")
+        check("5e-bis. job 5e drainé de la queue (txn TXNSUBP)",
+              drained is not None and drained["job"].payment.txn_id == "TXNSUBP")
+        # Chemin 'queued' nominal : la correspondance est créée MAINTENANT.
+        m = _active_mapping("37600001")
+        check("5e-ter. correspondance créée au passage en 'queued' (37600001 -> 707)",
+              m is not None and m["crm_client_id"] == "707", str(m))
 
 
 def test_concurrent_reservation_is_atomic() -> None:
@@ -352,6 +397,11 @@ def test_fresh_postgres_and_multi_subscription_and_phone_rules() -> None:
             check("13quater. SQLite : job_id persisté == réponse", rec["job_id"] == body.get("job_id"))
             check("13quinquies. error_message effacé", rec.get("error_message") is None)
 
+            # Chemin (a) nominal : correspondance créée à la mise en file.
+            m = _active_mapping(ORIGINAL_PHONE)
+            check("mapping (a) : créé au succès nominal (original_phone -> 709)",
+                  m is not None and m["crm_client_id"] == str(IDCLIENT), str(m))
+
             claimed = queue_store.claim_next("phase4b2-test-worker")
             check("job récupérable en queue", claimed is not None and claimed["job"].payment.txn_id == "TXNFRESH1")
             if claimed:
@@ -363,11 +413,20 @@ def test_fresh_postgres_and_multi_subscription_and_phone_rules() -> None:
                       job.payment.crm_balance_before == 4500)
 
             # 14. Une 2e confirmation ne ré-empile pas de Job (idempotent).
+            # Chemin (d) : on simule une mémoire perdue (crash juste après
+            # mark_queued, avant l'écriture du mapping) — la réponse
+            # idempotente doit la RÉPARER, best-effort.
+            _delete_mappings(ORIGINAL_PHONE)
+            check("setup (d) : correspondance supprimée (mémoire perdue simulée)",
+                  _active_mapping(ORIGINAL_PHONE) is None)
             call_count["n"] = 0
             r2 = client.post(f"/dashboard/api/unknown-clients/{rec_id}/confirm")
             check("14. 2e confirmation -> 200 (idempotent)", r2.status_code == 200)
             check("14bis. 2e confirmation renvoie le MÊME job_id", r2.json().get("job_id") == body.get("job_id"))
             check("14ter. enqueue() PAS rappelé à la 2e confirmation", call_count["n"] == 0)
+            m = _active_mapping(ORIGINAL_PHONE)
+            check("mapping (d) : réparé par la réponse idempotente 'déjà en file'",
+                  m is not None and m["crm_client_id"] == str(IDCLIENT), str(m))
     finally:
         queue_store.enqueue = original_enqueue
 
@@ -417,6 +476,11 @@ def test_enqueue_duplicate_is_reconciled_not_lost() -> None:
         rec = store.get_by_id(rec_id, db_path=DB)
         check("15quater. SQLite : status='queued', job_id == job pré-existant",
               rec["status"] == "queued" and rec["job_id"] == pre_existing_job.job_id)
+
+        # Chemin (b) : la réconciliation doublon écrit aussi la correspondance.
+        m = _active_mapping("37655002")
+        check("mapping (b) : créé par la réconciliation doublon (37655002 -> 710)",
+              m is not None and m["crm_client_id"] == str(IDCLIENT), str(m))
 
         # Un seul Job en base pour ce txn_id (jamais un 2e).
         with sqlite3.connect(os.environ["QUEUE_DB_PATH"]) as conn:
@@ -480,6 +544,11 @@ def test_crash_window_between_enqueue_and_mark_queued() -> None:
         check("16quater. SQLite : status='queued', job_id correct",
               rec["status"] == "queued" and rec["job_id"] == crashed_job.job_id)
 
+        # Chemin (c) : la récupération après crash écrit aussi la correspondance.
+        m = _active_mapping(ORIGINAL_PHONE)
+        check("mapping (c) : créé par la récupération après crash (37655003 -> 711)",
+              m is not None and m["crm_client_id"] == str(IDCLIENT), str(m))
+
         with sqlite3.connect(os.environ["QUEUE_DB_PATH"]) as conn:
             n = conn.execute("SELECT COUNT(*) FROM jobs WHERE txn_id = ?", (TXN,)).fetchone()[0]
         check("16quinquies. un seul job en queue pour ce txn_id (récupération sans doublon)", n == 1, n)
@@ -510,6 +579,8 @@ def test_fresh_confirming_without_job_returns_409_unchanged() -> None:
     check("19ter. updated_at INCHANGÉ (aucune écriture)", after["updated_at"] == before["updated_at"])
     check("19quater. job_id toujours NULL", after.get("job_id") is None)
     check("19quinquies. error_message toujours vide (pas de release)", after.get("error_message") is None)
+    check("19sexies. aucune correspondance créée (jamais 'queued')",
+          _active_mapping("37655007") is None)
 
 
 def test_stale_confirming_without_job_is_restored() -> None:
@@ -534,6 +605,8 @@ def test_stale_confirming_without_job_is_restored() -> None:
     check("20bis. restauré vers 'associated'", after["status"] == "associated")
     check("20ter. error_message renseigné (raison de la restauration)", bool(after.get("error_message")))
     check("20quater. job_id toujours NULL (aucun Job créé par la restauration)", after.get("job_id") is None)
+    check("20quater-bis. aucune correspondance créée par la restauration",
+          _active_mapping("37655008") is None)
 
     # Un nouvel essai doit désormais fonctionner normalement (précondition
     # 'associated' de nouveau satisfaite grâce à la restauration).
@@ -544,6 +617,9 @@ def test_stale_confirming_without_job_is_restored() -> None:
         _login(client)
         r2 = client.post(f"/dashboard/api/unknown-clients/{rec_id}/confirm")
         check("20quinquies. re-confirmation après restauration -> 200", r2.status_code == 200, r2.text)
+    m = _active_mapping("37655008")
+    check("20sexies. correspondance créée par la re-confirmation réussie (-> 717)",
+          m is not None and m["crm_client_id"] == "717", str(m))
 
 
 def test_stale_confirming_with_existing_job_is_reconciled_not_restored() -> None:
@@ -594,6 +670,9 @@ def test_stale_confirming_with_existing_job_is_reconciled_not_restored() -> None
     after = store.get_by_id(rec_id, db_path=DB)
     check("21quater. statut = 'queued' (JAMAIS 'associated')", after["status"] == "queued")
     check("21quinquies. job_id persisté == job pré-existant", after["job_id"] == stale_job.job_id)
+    m = _active_mapping(ORIGINAL_PHONE)
+    check("21quinquies-bis. mapping créé par la réconciliation stale (37655009 -> 718)",
+          m is not None and m["crm_client_id"] == str(IDCLIENT), str(m))
 
     with sqlite3.connect(os.environ["QUEUE_DB_PATH"]) as conn:
         n = conn.execute("SELECT COUNT(*) FROM jobs WHERE txn_id = ?", (TXN,)).fetchone()[0]
@@ -634,6 +713,7 @@ def test_concurrent_stale_recovery_is_atomic() -> None:
 def main() -> int:
     queue_store.init_db()
     store.init_db(DB)
+    crm_mappings.init_db(MAP_DB)
     _patch_forbidden_calls()
     _install_fakes()
 

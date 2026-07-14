@@ -46,6 +46,7 @@ sys.path.insert(0, str(ROOT / "src"))
 _TMP = Path(tempfile.mkdtemp(prefix="job_builder_test_"))
 os.environ["QUEUE_DB_PATH"] = str(_TMP / "queue.db")
 os.environ["UNKNOWN_CLIENTS_DB_PATH"] = str(_TMP / "unknown_clients.db")
+os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"] = str(_TMP / "whatsapp_crm_mappings.db")
 os.environ["EVENTS_DB_PATH"] = str(_TMP / "events.db")
 os.environ["SUPPORT_RECIPIENT"] = ""  # notifs support désactivées (pas d'appel UltraMsg)
 os.environ["UNDERPAYMENT_TOLERANCE"] = "150"

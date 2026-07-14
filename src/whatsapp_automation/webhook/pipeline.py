@@ -22,7 +22,7 @@ from .. import config
 from ..jobqueue import store as queue_store
 from ..db import postgres as pg
 from ..worker import ultramsg
-from . import job_builder
+from . import crm_mappings, job_builder
 from .ai_ocr_client import extract as ai_ocr_extract
 from .dashboard import unknown_clients_store
 from .image_downloader import download as download_image
@@ -235,6 +235,34 @@ async def process(payload: dict) -> dict:
     client_rows = pg.get_clients_by_phone(from_phone)
     if not client_rows and body_phone and body_phone != from_phone:
         client_rows = pg.get_clients_by_phone(body_phone)
+
+    # Repli : correspondance numéro WhatsApp → idclient apprise via le
+    # dashboard (un reçu précédent de ce numéro a été rattaché manuellement à
+    # un client par son identifiant CRM). Consultée UNIQUEMENT si les deux
+    # lookups téléphone ont échoué — elle ne remplace jamais le lookup normal.
+    # Best-effort : table indisponible ou correspondance périmée (client
+    # supprimé de PostgreSQL) → on retombe sur le client_not_found historique.
+    if not client_rows and from_phone:
+        mapping = crm_mappings.get_active_mapping(from_phone)
+        if mapping:
+            try:
+                client_rows = pg.get_client_by_id(mapping["crm_client_id"])
+            except Exception as exc:
+                logger.warning(
+                    "repli mapping WhatsApp→CRM : get_client_by_id(%s) KO : %s: %r",
+                    mapping["crm_client_id"], type(exc).__name__, exc,
+                )
+                client_rows = []
+            if client_rows:
+                logger.info(
+                    "client %s retrouvé via mapping WhatsApp→CRM (phone=%s)",
+                    mapping["crm_client_id"], from_phone,
+                )
+            else:
+                logger.warning(
+                    "mapping WhatsApp→CRM périmé : idclient=%s introuvable (phone=%s)",
+                    mapping["crm_client_id"], from_phone,
+                )
 
     client_row = client_rows[0] if client_rows else None
 
