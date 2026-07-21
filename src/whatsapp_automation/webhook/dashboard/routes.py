@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from ... import config
 from ...db import postgres as pg
 from ...jobqueue import store as queue_store
-from .. import crm_mappings, job_builder
+from .. import job_builder
 from ..validators import validate_crm_balance, validate_payment_balance
 from . import auth, events_db, samples, unknown_clients_store
 
@@ -144,7 +144,7 @@ def api_event_detail(
     - reçu ENVOYÉ au client (texte exact + PDF) reconstitué par payment_id ;
     - historique des paiements du client.
     """
-    rows = _client_paiements(client_id, phone)
+    rows, _ = _client_paiements(client_id, phone)
 
     # Événements sans txn dans le log (ex : sous-paiement) : on retrouve le
     # paiement correspondant (même client, même montant, même jour) pour
@@ -165,7 +165,7 @@ def api_event_detail(
     # Si on n'avait ni client_id ni téléphone (ex : reçu envoyé), on récupère
     # l'idclient du job reconstitué pour quand même afficher l'historique.
     if not rows and receipt and receipt.get("client_id"):
-        rows = _client_paiements(receipt["client_id"], "")
+        rows, _ = _client_paiements(receipt["client_id"], "")
 
     payments = [{
         "id_payment": r.get("id_payment"),
@@ -181,16 +181,20 @@ def _row_date(r: dict) -> str:
     return f"{r['year']:04d}-{r['month']:02d}-{r['day']:02d}"
 
 
-def _client_paiements(client_id: int, phone: str) -> list[dict]:
+def _client_paiements(client_id: int, phone: str) -> tuple[list[dict], bool]:
+    """Retourne (lignes, db_error). db_error=True signale une panne de
+    connexion PostgreSQL (ex : pg_hba.conf), jamais confondue avec "aucun
+    paiement trouvé" (liste vide, db_error=False)."""
     try:
         if client_id:
-            return pg.get_paiements_by_client(client_id)
+            return pg.get_paiements_by_client(client_id), False
         if phone:
-            return pg.get_paiements_by_phone(phone)
+            return pg.get_paiements_by_phone(phone), False
     except Exception as exc:
         logger.warning("dashboard: historique paiements KO (client=%s phone=%s): %s",
                        client_id, phone, exc)
-    return []
+        return [], True
+    return [], False
 
 
 def _build_receipt(payment_id: str) -> dict:
@@ -226,12 +230,15 @@ def _build_receipt(payment_id: str) -> dict:
 @router.get("/dashboard/api/client", dependencies=[Depends(auth.require_session)])
 def api_client(id: int = Query(..., ge=1, description="ID client")):
     """Fiche client par ID : infos + abonnements + paiements + tous ses événements."""
+    db_error = False
     try:
         rows = pg.get_client_by_id(id)
     except Exception as exc:
         logger.warning("dashboard: get_client_by_id(%s) KO: %s", id, exc)
         rows = []
-    paiements = _client_paiements(id, "")
+        db_error = True
+    paiements, paiements_error = _client_paiements(id, "")
+    db_error = db_error or paiements_error
 
     # Téléphones connus du client (depuis `info` et la table paiment) pour
     # rattacher aussi les événements qui ne portent que le numéro.
@@ -260,6 +267,7 @@ def api_client(id: int = Query(..., ge=1, description="ID client")):
 
     return {
         "found": bool(rows or paiements or events),
+        "db_error": db_error,
         "client": {
             "id": id,
             "name": name,
@@ -287,7 +295,7 @@ def api_unknown_clients(
     status: str = Query("", description="Filtre statut (pending, ...). Vide = tous."),
 ):
     """Paiements reçus d'un numéro non rattaché à un client (table dédiée
-    `numeros_introuvable`, Phase 1). Lecture seule, aucun appel externe."""
+    `numeros_introuvable`). Lecture seule, aucun appel externe."""
     return unknown_clients_store.list_recent(limit=limit, status=status or None)
 
 
@@ -324,15 +332,6 @@ class AssociateBody(BaseModel):
     crm_client_id: int | str = ""
 
 
-def _phone_from_info(info: Optional[str]) -> Optional[str]:
-    """Numéro préfixe du champ `info` ("<phone>-<nom>"), même parsing que
-    api_client ci-dessus — le téléphone d'abonnement connu de PostgreSQL pour
-    cette ligne (purement informatif : la réponse WhatsApp finale part
-    toujours à original_phone, jamais à ce numéro)."""
-    m = re.match(r"\s*(\d{6,})", info or "")
-    return m.group(1) if m else None
-
-
 def _name_from_info(info: Optional[str]) -> Optional[str]:
     """Nom du client extrait du champ `info` ("<phone>-<nom>"), même parsing
     que le résumé client de api_client ci-dessus."""
@@ -355,17 +354,19 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
     identifié par son IDENTIFIANT CRM saisi par l'admin dans le modal du
     dashboard.
 
-    Remplace l'association par numéro de téléphone (Phase 3) : l'idclient est
-    exact là où la recherche par téléphone (`info LIKE %phone%`) était ambiguë.
-    Le lookup passe par pg.get_client_by_id — jamais get_clients_by_phone ici.
+    L'identifiant CRM (idclient) est exact là où une recherche par téléphone
+    (`info LIKE %phone%`) serait ambiguë. Le lookup passe par
+    pg.get_client_by_id — jamais get_clients_by_phone ici.
 
-    Lecture seule sur PostgreSQL (aucune écriture). Écrit uniquement dans la
-    base SQLite dédiée `numeros_introuvable`. N'écrit PAS la correspondance
-    `whatsapp_crm_mappings` : elle n'est mémorisée qu'une fois le paiement
-    réellement mis en file (statut 'queued', cf. `_ensure_whatsapp_mapping`)
-    — une association abandonnée ou erronée ne doit jamais influencer le
-    routage des reçus futurs (décision Ali). Ne crée AUCUN paiement, AUCUN
-    Job de file d'attente, et n'appelle ni UCRM, ni MikroTik, ni UltraMsg.
+    Lecture seule sur PostgreSQL (aucune écriture). Écrit uniquement le
+    `client_id` sur le ticket `numeros_introuvable` (le `whatsapp_phone` est
+    déjà connu depuis sa création). Cette association seule n'influence PAS
+    encore le routage des paiements futurs de ce numéro : tant que le ticket
+    n'est pas confirmé (statut 'queued'), `find_client_id_for_phone` l'ignore
+    — une association abandonnée ou erronée (mauvais identifiant CRM saisi,
+    jamais confirmé) ne doit jamais router silencieusement un paiement futur
+    vers le mauvais client. Ne crée AUCUN paiement, AUCUN Job de file
+    d'attente, et n'appelle ni UCRM, ni MikroTik, ni UltraMsg.
     """
     row = unknown_clients_store.get_by_id(id)
     if not row:
@@ -411,8 +412,6 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
     # construire le Job (jamais ces valeurs figées).
     first = client_rows[0]
     client_id = str(crm_client_id)
-    mac_address = first.get("mac") or None
-    subscription_phone = _phone_from_info(first.get("info"))
     subscriptions = [
         {
             "mac": r.get("mac"),
@@ -424,13 +423,7 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
         for r in client_rows
     ]
 
-    updated = unknown_clients_store.associate_unknown_client(
-        id,
-        entered_phone=None,  # plus de saisie téléphone : association par identifiant CRM
-        subscription_phone=subscription_phone,
-        client_id=client_id,
-        mac_address=mac_address,
-    )
+    updated = unknown_clients_store.associate_unknown_client(id, client_id=client_id)
     if not updated:
         raise HTTPException(status_code=500, detail="Échec de l'association (SQLite).")
 
@@ -441,8 +434,6 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
         "client_preview": {
             "client_id": client_id,
             "name": _name_from_info(first.get("info")),
-            "subscription_phone": subscription_phone,
-            "mac_address": mac_address,
             "status": _status_label(first.get("statu")),
             "ip_address": first.get("ipaddress"),
             "rows_count": len(client_rows),
@@ -453,36 +444,10 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
     }
 
 
-def _ensure_whatsapp_mapping(row: dict) -> None:
-    """Mémorise la correspondance numéro WhatsApp → idclient une fois — et
-    seulement une fois — le paiement en file (statut 'queued').
-
-    Décision Ali : la mémoire n'apprend que des associations allées jusqu'à la
-    confirmation ; une association abandonnée ou erronée ne doit jamais router
-    silencieusement les paiements futurs vers un mauvais client. Appelée sur
-    TOUS les chemins qui atteignent 'queued' : succès nominal, réponse
-    idempotente déjà-en-file, et les deux réconciliations (doublon txn_id,
-    récupération après crash).
-
-    Best-effort : `upsert_mapping` ne lève jamais (erreur SQLite loggée dans
-    le store) — un paiement correctement mis en file n'est jamais remis en
-    cause par un échec de cette mémoire. Idempotent : ré-appeler avec la même
-    paire rafraîchit simplement la correspondance active."""
-    phone = row.get("original_phone")
-    client_id = row.get("client_id")
-    if not phone or not client_id:
-        return
-    crm_mappings.upsert_mapping(
-        whatsapp_phone=phone,
-        crm_client_id=str(client_id),
-        created_by="dashboard",
-    )
-
-
 class _ConfirmFailure(Exception):
-    """Échec récupérable pendant la confirmation (Phase 4B-2) : la
-    réservation 'confirming' doit être relâchée vers 'associated' avant de
-    répondre à l'appelant (aucun Job n'a été construit/empilé)."""
+    """Échec récupérable pendant la confirmation : la réservation
+    'confirming' doit être relâchée vers 'associated' avant de répondre à
+    l'appelant (aucun Job n'a été construit/empilé)."""
 
     def __init__(self, message: str, status_code: int = 409):
         super().__init__(message)
@@ -504,7 +469,6 @@ def _reconcile_via_existing_job(id: int, row: dict) -> Optional[dict]:
         return None
     if not unknown_clients_store.mark_queued(id, job_info["job_id"]):
         return None
-    _ensure_whatsapp_mapping(row)
     return {
         "ok": True,
         "status": "queued",
@@ -572,14 +536,14 @@ def _recover_stale_or_reject(id: int, row: dict) -> None:
     dependencies=[Depends(auth.require_session)],
 )
 async def api_unknown_client_confirm(id: int):
-    """Phase 4B-2 : confirme un enregistrement 'associated' et empile un Job
-    de paiement complet en queue SQLite.
+    """Confirme un ticket 'associated' et empile un Job de paiement complet
+    en queue SQLite.
 
     Ne fait JAMAIS : UCRM create_payment, MikroTik unblock, UltraMsg send,
     écriture PostgreSQL — ces actions restent strictement réservées au
     worker, qui consommera le Job une fois en file. Cette route ne fait que
-    relire PostgreSQL/UCRM à l'instant présent (jamais les données figées de
-    la Phase 3) et appeler `queue_store.enqueue()` exactement une fois.
+    relire PostgreSQL/UCRM à l'instant présent (jamais les valeurs figées de
+    l'association) et appeler `queue_store.enqueue()` exactement une fois.
 
     Concurrence/crash : `reserve_for_confirmation` (CAS associated->confirming)
     garantit qu'une seule confirmation avance à la fois pour cet
@@ -599,9 +563,6 @@ async def api_unknown_client_confirm(id: int):
 
     if row["status"] == "queued":
         # Idempotent : une confirmation déjà aboutie ne recrée jamais de Job.
-        # Répare au passage une correspondance manquante (ex : crash survenu
-        # juste après mark_queued, avant l'écriture de la mémoire).
-        _ensure_whatsapp_mapping(row)
         return {
             "ok": True,
             "status": "queued",
@@ -627,14 +588,10 @@ async def api_unknown_client_confirm(id: int):
     amount = row.get("amount")
     if not amount or amount <= 0:
         raise HTTPException(status_code=409, detail="Montant manquant ou invalide.")
-    if not row.get("original_phone"):
-        raise HTTPException(status_code=409, detail="original_phone manquant.")
+    if not row.get("whatsapp_phone"):
+        raise HTTPException(status_code=409, detail="whatsapp_phone manquant.")
     if not row.get("client_id"):
         raise HTTPException(status_code=409, detail="client_id manquant (association requise).")
-    # NB : entered_phone/subscription_phone ne sont plus exigés — l'association
-    # par identifiant CRM ne les renseigne pas toujours (info sans préfixe
-    # téléphone), et le Job n'en dépend pas : client_id pilote PostgreSQL/UCRM,
-    # original_phone pilote la réponse WhatsApp.
     if row.get("job_id"):
         raise HTTPException(status_code=409, detail="Déjà rattaché à un job existant.")
 
@@ -651,10 +608,9 @@ async def api_unknown_client_confirm(id: int):
         except (TypeError, ValueError):
             raise _ConfirmFailure(f"client_id invalide: {row['client_id']!r}")
 
-        # Relecture PostgreSQL fraîche — jamais le MAC/statut figé en Phase 3.
-        # Un client peut avoir plusieurs abonnements : on récupère toutes les
-        # lignes (get_client_by_id retourne déjà TOUTES les lignes de cet
-        # idclient, cf. Phase 4B-1).
+        # Relecture PostgreSQL fraîche — jamais des valeurs figées à
+        # l'association. Un client peut avoir plusieurs abonnements :
+        # get_client_by_id retourne déjà TOUTES les lignes de cet idclient.
         try:
             client_rows = pg.get_client_by_id(client_id_int)
         except Exception as exc:
@@ -688,7 +644,7 @@ async def api_unknown_client_confirm(id: int):
             threshold=config.UNDERPAYMENT_TOLERANCE,
         )
 
-        original_phone = row["original_phone"]
+        whatsapp_phone = row["whatsapp_phone"]
         job = job_builder.build_job(
             client_row=client_row,
             amount_paid=amount_paid,
@@ -697,12 +653,12 @@ async def api_unknown_client_confirm(id: int):
             template=row.get("operator") or "generic",
             crm_balance=crm_balance,
             unblock_macs=decision.unblock_macs,
-            # Règle métier Phase 4 : le reçu final part TOUJOURS au numéro qui
-            # a envoyé le paiement (original_phone) — client.phone ET
+            # Règle métier : le reçu final part TOUJOURS au numéro qui a
+            # envoyé le paiement (whatsapp_phone) — client.phone ET
             # source.wnum, contrairement au flux webhook où ils peuvent
             # différer (cf. job_builder.build_job).
-            phone_for_worker=original_phone,
-            wnum=original_phone,
+            phone_for_worker=whatsapp_phone,
+            wnum=whatsapp_phone,
             sample_id=row.get("sample_id") or "",
         )
     except _ConfirmFailure as fail:
@@ -727,7 +683,6 @@ async def api_unknown_client_confirm(id: int):
         job_info = queue_store.find_job_by_txn(job.payment.txn_id)
         if job_info:
             unknown_clients_store.mark_queued(id, job_info["job_id"])
-            _ensure_whatsapp_mapping(row)
             return {
                 "ok": True,
                 "status": "queued",
@@ -741,7 +696,6 @@ async def api_unknown_client_confirm(id: int):
         raise HTTPException(status_code=409, detail="Doublon détecté, réessayez.")
 
     unknown_clients_store.mark_queued(id, job.job_id)
-    _ensure_whatsapp_mapping(row)
     logger.info(
         "dashboard confirm id=%s job_id=%s client=%d txn=%s amount=%d unblock_macs=%s",
         id, job.job_id, job.client.id, job.payment.txn_id, job.payment.amount_mru, job.unblock_macs,

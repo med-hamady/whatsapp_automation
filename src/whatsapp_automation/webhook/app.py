@@ -20,7 +20,7 @@ from .. import __version__, config
 from ..db import postgres as pg
 from ..jobqueue import store as queue_store
 from ..worker import mikrotik, ucrm
-from . import crm_mappings, pipeline
+from . import pipeline
 from .dashboard import router as dashboard_router
 from .dashboard import events_db, unknown_clients_store
 from .phone import parse_from_field
@@ -82,7 +82,6 @@ async def lifespan(app: FastAPI):
     queue_store.init_db()
     events_db.init_db()
     unknown_clients_store.init_db()
-    crm_mappings.init_db()
     stop = asyncio.Event()
     ingest_task = asyncio.create_task(_events_ingest_loop(stop))
     try:

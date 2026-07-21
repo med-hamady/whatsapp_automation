@@ -657,7 +657,7 @@
     }
 
     function ucRow(r) {
-      const phone = r.original_phone || r.body_phone || "—";
+      const phone = r.whatsapp_phone || r.body_phone || "—";
       const amount = r.amount != null ? `${r.amount} MRU` : "—";
       const txn = r.txn_id ? r.txn_id : `<span class="muted">manquant</span>`;
       return `<tr class="ev-row uc-row" data-id="${r.id}">
@@ -716,7 +716,7 @@
 
       document.getElementById("ucMeta").innerHTML = [
         `<div><b>Reçu le :</b> ${d.date_heure || "—"}</div>`,
-        `<div><b>Téléphone expéditeur (WhatsApp) :</b> ${d.original_phone || "—"}</div>`,
+        `<div><b>Téléphone expéditeur (WhatsApp) :</b> ${d.whatsapp_phone || "—"}</div>`,
         d.body_phone ? `<div><b>Téléphone mentionné dans le message :</b> ${d.body_phone}</div>` : "",
         `<div><b>Montant :</b> ${d.amount != null ? d.amount + " MRU" : "—"}</div>`,
         `<div><b>Opérateur :</b> ${d.operator || "—"}</div>`,
@@ -821,6 +821,10 @@
       }
       btn.disabled = false;
 
+      if (c.db_error) {
+        msg.innerHTML = `<div class="warn-box">Base clients PostgreSQL indisponible (connexion refusée). Ce n'est PAS "client introuvable" — réessayez plus tard ou contactez l'admin réseau.</div>`;
+        return;
+      }
       const subs = (c.found && c.client && c.client.subscriptions) || [];
       if (!c.found || !subs.length) {
         msg.innerHTML = `<div class="warn-box">Aucun client trouvé pour cet identifiant CRM.</div>`;
@@ -866,7 +870,7 @@
       const d = currentUcDetail || {};
       openUcConfirmModal({
         client_id: p.client_id,
-        original_phone: d.original_phone,
+        whatsapp_phone: d.whatsapp_phone,
         amount: d.amount,
         txn_id: d.txn_id,
         operator: d.operator,
@@ -888,7 +892,7 @@
       }
       return {
         client_id: d.client_id,
-        original_phone: d.original_phone,
+        whatsapp_phone: d.whatsapp_phone,
         amount: d.amount,
         txn_id: d.txn_id,
         operator: d.operator,
@@ -899,7 +903,7 @@
     function openUcConfirmModal(info) {
       document.getElementById("ucConfirmSummary").innerHTML = [
         `<div><b>Identifiant CRM :</b> ${info.client_id ?? "—"}</div>`,
-        `<div><b>Numéro WhatsApp :</b> ${info.original_phone || "—"}</div>`,
+        `<div><b>Numéro WhatsApp :</b> ${info.whatsapp_phone || "—"}</div>`,
         `<div><b>Montant :</b> ${info.amount != null ? info.amount + " MRU" : "—"}</div>`,
         `<div><b>Transaction :</b> ${info.txn_id || "—"}</div>`,
         `<div><b>Opérateur :</b> ${info.operator || "—"}</div>`,

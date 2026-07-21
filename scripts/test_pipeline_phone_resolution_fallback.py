@@ -1,28 +1,27 @@
-"""Tests d'intégration : repli mapping WhatsApp → CRM dans pipeline.process().
+"""Tests d'intégration : repli numéro → client dans pipeline.process(), basé
+uniquement sur `numeros_introuvable` (find_client_id_for_phone).
 
 Vérifie :
-  1. lookup téléphone OK -> le mapping n'est JAMAIS consulté (le repli ne
-     remplace pas le lookup normal, même si une correspondance existe vers un
-     autre client) ;
-  2. lookup téléphone KO + correspondance active -> client rechargé par
-     pg.get_client_by_id, flux normal continue (Job enqueued, client.id =
-     idclient mappé, client.phone/wnum = from_phone), AUCUN enregistrement
-     numeros_introuvable créé ;
-  3. lookup téléphone KO + pas de correspondance -> comportement
-     client_not_found historique intact (skip + enregistrement
-     numeros_introuvable) ;
-  4. correspondance périmée (idclient disparu de PostgreSQL) -> retombe sur
+  1. lookup téléphone OK -> le repli n'est JAMAIS consulté (il ne remplace pas
+     le lookup normal, même si une résolution existe vers un autre client) ;
+  2. lookup téléphone KO + ticket 'queued' existant pour ce numéro -> client
+     rechargé par pg.get_client_by_id, flux normal continue (Job enqueued,
+     client.id = idclient résolu, client.phone/wnum = from_phone), AUCUN
+     nouveau numeros_introuvable créé ;
+  3. lookup téléphone KO + aucun ticket -> comportement client_not_found
+     historique intact (skip + enregistrement numeros_introuvable) ;
+  4. résolution périmée (idclient disparu de PostgreSQL) -> retombe sur
      client_not_found (jamais de crash) ;
   5. parcours complet : 1er reçu -> client_not_found -> association par
-     identifiant CRM via la route dashboard (AUCUNE correspondance créée à ce
-     stade — décision Ali) -> confirmation -> statut 'queued' -> correspondance
-     créée -> 2e reçu du MÊME numéro reconnu automatiquement via la
-     correspondance, enqueued, aucun nouveau numeros_introuvable ;
+     identifiant CRM via la route dashboard (le ticket reste 'associated',
+     donc pas encore résolu pour de futurs paiements) -> confirmation ->
+     statut 'queued' -> résolu -> 2e reçu du MÊME numéro reconnu
+     automatiquement, enqueued, aucun nouveau numeros_introuvable ;
   6. aucun appel réel UCRM create_payment / MikroTik / UltraMsg (patchés pour
      lever si appelés) ; worker jamais démarré.
 
-100% local : bases SQLite temporaires, PostgreSQL/UCRM/ai_ocr/téléchargement
-tous monkeypatchés. À lancer : python scripts/test_pipeline_crm_mapping_fallback.py
+100% local : base SQLite temporaire, PostgreSQL/UCRM/ai_ocr/téléchargement
+tous monkeypatchés. À lancer : python scripts/test_pipeline_phone_resolution_fallback.py
 """
 
 from __future__ import annotations
@@ -40,10 +39,9 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-_TMP = Path(tempfile.mkdtemp(prefix="crm_fallback_test_"))
+_TMP = Path(tempfile.mkdtemp(prefix="phone_resolution_test_"))
 os.environ["QUEUE_DB_PATH"] = str(_TMP / "queue.db")
 os.environ["UNKNOWN_CLIENTS_DB_PATH"] = str(_TMP / "unknown_clients.db")
-os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"] = str(_TMP / "whatsapp_crm_mappings.db")
 os.environ["EVENTS_DB_PATH"] = str(_TMP / "events.db")
 os.environ["SUPPORT_RECIPIENT"] = ""  # notifs support désactivées (pas d'appel UltraMsg)
 os.environ["UNDERPAYMENT_TOLERANCE"] = "150"
@@ -51,11 +49,11 @@ os.environ["DASHBOARD_PASSWORD"] = "test-password-fallback"
 
 from whatsapp_automation.db import postgres as pg  # noqa: E402
 from whatsapp_automation.jobqueue import store as queue_store  # noqa: E402
-from whatsapp_automation.webhook import crm_mappings, pipeline  # noqa: E402
+from whatsapp_automation.webhook import pipeline  # noqa: E402
 from whatsapp_automation.webhook.dashboard import unknown_clients_store  # noqa: E402
 from whatsapp_automation.worker import mikrotik, ucrm, ultramsg  # noqa: E402
 
-MAP_DB = os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"]
+UC_DB = os.environ["UNKNOWN_CLIENTS_DB_PATH"]
 
 passed = failed = 0
 
@@ -154,55 +152,66 @@ def _set_ocr(txn: str, sample: str, montant: int = 1500) -> None:
     })
 
 
-def test_phone_lookup_wins_over_mapping() -> None:
-    """1. Le lookup téléphone normal prime TOUJOURS : mapping présent vers un
+def _seed_resolved_ticket(phone: str, idclient: int, sample_id: str) -> None:
+    """Simule un ticket `numeros_introuvable` déjà associé ET confirmé pour ce
+    numéro (équivalent d'une correspondance active de l'ancien design à deux
+    tables) : insère un ticket et le fait passer directement à 'queued'."""
+    unknown_clients_store.insert_unknown_client(
+        sample_id=sample_id, whatsapp_phone=phone, txn_id=f"SEED-{sample_id}", db_path=UC_DB,
+    )
+    rec = unknown_clients_store.get_by_sample_id(sample_id, db_path=UC_DB)
+    unknown_clients_store.associate_unknown_client(rec["id"], client_id=str(idclient), db_path=UC_DB)
+    unknown_clients_store.reserve_for_confirmation(rec["id"], db_path=UC_DB)
+    unknown_clients_store.mark_queued(rec["id"], f"seed-job-{sample_id}", db_path=UC_DB)
+
+
+def test_phone_lookup_wins_over_resolution() -> None:
+    """1. Le lookup téléphone normal prime TOUJOURS : ticket résolu vers un
     autre client, mais le téléphone matche -> client du lookup téléphone."""
     PHONE = "37641001"
     FAKE_PG_CLIENTS[PHONE] = [client_row(801, "AA:01", statu=2)]
     FAKE_PG_BY_ID[802] = [client_row(802, "BB:01", statu=2)]
     FAKE_UCRM_DETAILS[801] = {"balance": 1500, "account_credit": 0}
     FAKE_UCRM_SERVICES[801] = [svc("AA:01", 1500)]
-    crm_mappings.upsert_mapping(whatsapp_phone=PHONE, crm_client_id="802",
-                                created_by="test", db_path=MAP_DB)
+    _seed_resolved_ticket(PHONE, 802, "2026-07-13/seed-fb1")
     PG_BY_ID_CALLS.clear()
     _set_ocr("TXN-FB-1", "2026-07-13/fb1")
 
     result = asyncio.run(pipeline.process(_payload(PHONE)))
     check("1. lookup téléphone OK -> enqueued", result.get("status") == "enqueued", result)
-    check("1bis. client du lookup téléphone (801), pas du mapping (802)",
+    check("1bis. client du lookup téléphone (801), pas de la résolution (802)",
           result.get("client_id") == 801, result)
-    check("1ter. get_client_by_id jamais appelé (mapping non consulté)",
+    check("1ter. get_client_by_id jamais appelé (résolution non consultée)",
           PG_BY_ID_CALLS == [], str(PG_BY_ID_CALLS))
     claimed = queue_store.claim_next("test-worker")
     check("1quater. job drainé (client 801)",
           claimed is not None and claimed["job"].client.id == 801)
 
 
-def test_mapping_fallback_loads_client() -> None:
-    """2. Téléphone inconnu mais correspondance active -> client rechargé par
-    idclient, flux normal (Job complet), AUCUN numeros_introuvable créé."""
+def test_resolution_fallback_loads_client() -> None:
+    """2. Téléphone inconnu mais ticket 'queued' existant -> client rechargé
+    par idclient, flux normal (Job complet), AUCUN nouveau numeros_introuvable."""
     PHONE = "37641002"
     IDCLIENT = 803
     # PAS d'entrée FAKE_PG_CLIENTS pour ce téléphone (lookup téléphone KO).
     FAKE_PG_BY_ID[IDCLIENT] = [client_row(IDCLIENT, "CC:01", statu=2)]
     FAKE_UCRM_DETAILS[IDCLIENT] = {"balance": 1500, "account_credit": 0}
     FAKE_UCRM_SERVICES[IDCLIENT] = [svc("CC:01", 1500)]
-    crm_mappings.upsert_mapping(whatsapp_phone=PHONE, crm_client_id=str(IDCLIENT),
-                                created_by="test", db_path=MAP_DB)
+    _seed_resolved_ticket(PHONE, IDCLIENT, "2026-07-13/seed-fb2")
     _set_ocr("TXN-FB-2", "2026-07-13/fb2")
 
     result = asyncio.run(pipeline.process(_payload(PHONE)))
-    check("2. repli mapping -> enqueued", result.get("status") == "enqueued", result)
-    check("2bis. client_id = idclient mappé", result.get("client_id") == IDCLIENT, result)
-    check("2ter. AUCUN numeros_introuvable créé",
-          unknown_clients_store.get_by_sample_id("2026-07-13/fb2") is None)
+    check("2. repli résolution -> enqueued", result.get("status") == "enqueued", result)
+    check("2bis. client_id = idclient résolu", result.get("client_id") == IDCLIENT, result)
+    check("2ter. AUCUN nouveau numeros_introuvable créé",
+          unknown_clients_store.get_by_sample_id("2026-07-13/fb2", db_path=UC_DB) is None)
 
     claimed = queue_store.claim_next("test-worker")
     check("2quater. job récupérable (txn TXN-FB-2)",
           claimed is not None and claimed["job"].payment.txn_id == "TXN-FB-2")
     if claimed:
         job = claimed["job"]
-        check("2quinquies. Job.client.id == idclient mappé", job.client.id == IDCLIENT)
+        check("2quinquies. Job.client.id == idclient résolu", job.client.id == IDCLIENT)
         check("2sexies. Job.client.phone == numéro WhatsApp expéditeur",
               job.client.phone == PHONE, job.client.phone)
         check("2septies. Job.source.wnum == numéro WhatsApp expéditeur",
@@ -211,42 +220,41 @@ def test_mapping_fallback_loads_client() -> None:
               job.unblock_macs == ["CC:01"])
 
 
-def test_no_mapping_keeps_client_not_found() -> None:
-    """3. Ni téléphone ni correspondance -> client_not_found historique intact."""
+def test_no_resolution_keeps_client_not_found() -> None:
+    """3. Ni téléphone ni ticket résolu -> client_not_found historique intact."""
     PHONE = "37641003"
     _set_ocr("TXN-FB-3", "2026-07-13/fb3")
     stats_before = queue_store.stats()
 
     result = asyncio.run(pipeline.process(_payload(PHONE)))
-    check("3. sans mapping -> skipped/client_not_found",
+    check("3. sans résolution -> skipped/client_not_found",
           result == {"status": "skipped", "reason": "client_not_found"}, result)
     check("3bis. aucun Job créé", queue_store.stats() == stats_before)
-    rec = unknown_clients_store.get_by_sample_id("2026-07-13/fb3")
+    rec = unknown_clients_store.get_by_sample_id("2026-07-13/fb3", db_path=UC_DB)
     check("3ter. enregistrement numeros_introuvable créé (comportement historique)",
           rec is not None and rec.get("txn_id") == "TXN-FB-3")
 
 
-def test_stale_mapping_falls_back_to_not_found() -> None:
-    """4. Correspondance active mais idclient disparu de PostgreSQL ->
-    client_not_found (jamais de crash, enregistrement préservé)."""
+def test_stale_resolution_falls_back_to_not_found() -> None:
+    """4. Ticket 'queued' mais idclient disparu de PostgreSQL -> client_not_found
+    (jamais de crash, enregistrement préservé)."""
     PHONE = "37641004"
-    crm_mappings.upsert_mapping(whatsapp_phone=PHONE, crm_client_id="99404",
-                                created_by="test", db_path=MAP_DB)
+    _seed_resolved_ticket(PHONE, 99404, "2026-07-13/seed-fb4")
     # FAKE_PG_BY_ID[99404] absent : le client n'existe plus.
     _set_ocr("TXN-FB-4", "2026-07-13/fb4")
 
     result = asyncio.run(pipeline.process(_payload(PHONE)))
-    check("4. mapping périmé -> skipped/client_not_found",
+    check("4. résolution périmée -> skipped/client_not_found",
           result == {"status": "skipped", "reason": "client_not_found"}, result)
-    rec = unknown_clients_store.get_by_sample_id("2026-07-13/fb4")
+    rec = unknown_clients_store.get_by_sample_id("2026-07-13/fb4", db_path=UC_DB)
     check("4bis. enregistrement numeros_introuvable créé", rec is not None)
 
 
 def test_full_journey_unknown_then_associate_then_recognized() -> None:
     """5. Parcours complet : 1er reçu inconnu -> association par identifiant
-    CRM (AUCUNE correspondance à ce stade) -> confirmation -> 'queued' ->
-    correspondance créée -> 2e reçu du même numéro reconnu via la
-    correspondance (plus jamais de numeros_introuvable pour ce numéro)."""
+    CRM (ticket 'associated', pas encore résolu pour le futur) -> confirmation
+    -> 'queued' -> résolu -> 2e reçu du même numéro reconnu automatiquement
+    (plus jamais de numeros_introuvable pour ce numéro)."""
     try:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -266,11 +274,11 @@ def test_full_journey_unknown_then_associate_then_recognized() -> None:
     result = asyncio.run(pipeline.process(_payload(PHONE)))
     check("5a. 1er reçu -> client_not_found",
           result == {"status": "skipped", "reason": "client_not_found"}, result)
-    rec = unknown_clients_store.get_by_sample_id("2026-07-13/fb5a")
+    rec = unknown_clients_store.get_by_sample_id("2026-07-13/fb5a", db_path=UC_DB)
     check("5b. enregistrement numeros_introuvable créé", rec is not None)
 
     # Association par identifiant CRM via la route dashboard, puis
-    # confirmation — la correspondance n'apparaît qu'au 'queued'.
+    # confirmation — la résolution n'est effective qu'au 'queued'.
     app = FastAPI()
     app.include_router(dashboard_router)
     with TestClient(app) as client:
@@ -279,15 +287,14 @@ def test_full_journey_unknown_then_associate_then_recognized() -> None:
         r = client.post(f"/dashboard/api/unknown-clients/{rec['id']}/associate",
                         json={"crm_client_id": str(IDCLIENT)})
         check("5d. association par identifiant CRM -> 200", r.status_code == 200, r.text)
-        check("5e. AUCUNE correspondance créée à l'association (décision Ali)",
-              crm_mappings.get_active_mapping(PHONE, db_path=MAP_DB) is None)
+        check("5e. pas encore résolu à l'association (ticket 'associated' seulement)",
+              unknown_clients_store.find_client_id_for_phone(PHONE, db_path=UC_DB) is None)
 
         r = client.post(f"/dashboard/api/unknown-clients/{rec['id']}/confirm")
         check("5f. confirmation -> 200 (statut 'queued')", r.status_code == 200, r.text)
 
-    mapping = crm_mappings.get_active_mapping(PHONE, db_path=MAP_DB)
-    check("5g. correspondance créée au passage en 'queued'",
-          mapping is not None and mapping["crm_client_id"] == str(IDCLIENT), str(mapping))
+    resolved = unknown_clients_store.find_client_id_for_phone(PHONE, db_path=UC_DB)
+    check("5g. résolu au passage en 'queued'", resolved == str(IDCLIENT), str(resolved))
 
     # Draine le job de la confirmation (TXN-FB-5A) pour que le claim suivant
     # récupère bien celui du 2e reçu (queue FIFO).
@@ -298,11 +305,11 @@ def test_full_journey_unknown_then_associate_then_recognized() -> None:
     # 2e reçu du MÊME numéro : reconnu automatiquement, plus d'introuvable.
     _set_ocr("TXN-FB-5B", "2026-07-13/fb5b", montant=1500)
     result = asyncio.run(pipeline.process(_payload(PHONE)))
-    check("5i. 2e reçu -> enqueued (reconnu via la correspondance)",
+    check("5i. 2e reçu -> enqueued (reconnu via la résolution)",
           result.get("status") == "enqueued", result)
     check("5j. client_id = idclient associé", result.get("client_id") == IDCLIENT)
     check("5k. AUCUN nouveau numeros_introuvable",
-          unknown_clients_store.get_by_sample_id("2026-07-13/fb5b") is None)
+          unknown_clients_store.get_by_sample_id("2026-07-13/fb5b", db_path=UC_DB) is None)
 
     claimed = queue_store.claim_next("test-worker")
     check("5l. job du 2e reçu récupérable",
@@ -317,14 +324,13 @@ def test_full_journey_unknown_then_associate_then_recognized() -> None:
 def main() -> int:
     queue_store.init_db()
     unknown_clients_store.init_db()
-    crm_mappings.init_db(MAP_DB)
     _patch_forbidden_calls()
     _install_pipeline_fakes()
 
-    test_phone_lookup_wins_over_mapping()
-    test_mapping_fallback_loads_client()
-    test_no_mapping_keeps_client_not_found()
-    test_stale_mapping_falls_back_to_not_found()
+    test_phone_lookup_wins_over_resolution()
+    test_resolution_fallback_loads_client()
+    test_no_resolution_keeps_client_not_found()
+    test_stale_resolution_falls_back_to_not_found()
     test_full_journey_unknown_then_associate_then_recognized()
 
     print(f"\n=== {passed} PASS / {failed} FAIL ===")

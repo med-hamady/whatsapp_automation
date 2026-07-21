@@ -22,7 +22,7 @@ from .. import config
 from ..jobqueue import store as queue_store
 from ..db import postgres as pg
 from ..worker import ultramsg
-from . import crm_mappings, job_builder
+from . import job_builder
 from .ai_ocr_client import extract as ai_ocr_extract
 from .dashboard import unknown_clients_store
 from .image_downloader import download as download_image
@@ -128,16 +128,16 @@ def _save_unknown_client(
     group_id: Optional[str],
     raw_text: str,
 ) -> None:
-    """Préserve les données du paiement dans `numeros_introuvable` (Phase 1 :
-    aucun Job créé, aucun appel UCRM/MikroTik). insert_unknown_client() est
-    déjà best-effort (erreur SQLite loggée, jamais levée)."""
+    """Préserve les données du paiement dans `numeros_introuvable` (aucun Job
+    créé, aucun appel UCRM/MikroTik). insert_unknown_client() est déjà
+    best-effort (erreur SQLite loggée, jamais levée)."""
     unknown_clients_store.insert_unknown_client(
         sample_id=sample_id,
         txn_id=txn_id,
         amount=amount,
         date_heure=date_heure,
         operator=operator,
-        original_phone=from_phone,
+        whatsapp_phone=from_phone,
         body_phone=body_phone,
         group_id=group_id,
         raw_text=raw_text,
@@ -236,32 +236,33 @@ async def process(payload: dict) -> dict:
     if not client_rows and body_phone and body_phone != from_phone:
         client_rows = pg.get_clients_by_phone(body_phone)
 
-    # Repli : correspondance numéro WhatsApp → idclient apprise via le
-    # dashboard (un reçu précédent de ce numéro a été rattaché manuellement à
-    # un client par son identifiant CRM). Consultée UNIQUEMENT si les deux
-    # lookups téléphone ont échoué — elle ne remplace jamais le lookup normal.
-    # Best-effort : table indisponible ou correspondance périmée (client
-    # supprimé de PostgreSQL) → on retombe sur le client_not_found historique.
+    # Repli : un ticket `numeros_introuvable` précédent de ce numéro a déjà
+    # été confirmé (queued) suite à un rattachement manuel dans le dashboard —
+    # cf. unknown_clients_store.find_client_id_for_phone. Consultée UNIQUEMENT
+    # si les deux lookups téléphone ont échoué — elle ne remplace jamais le
+    # lookup normal. Best-effort : ticket introuvable ou correspondance
+    # périmée (client supprimé de PostgreSQL) → on retombe sur le
+    # client_not_found historique.
     if not client_rows and from_phone:
-        mapping = crm_mappings.get_active_mapping(from_phone)
-        if mapping:
+        mapped_client_id = unknown_clients_store.find_client_id_for_phone(from_phone)
+        if mapped_client_id:
             try:
-                client_rows = pg.get_client_by_id(mapping["crm_client_id"])
+                client_rows = pg.get_client_by_id(mapped_client_id)
             except Exception as exc:
                 logger.warning(
-                    "repli mapping WhatsApp→CRM : get_client_by_id(%s) KO : %s: %r",
-                    mapping["crm_client_id"], type(exc).__name__, exc,
+                    "repli numéro→client : get_client_by_id(%s) KO : %s: %r",
+                    mapped_client_id, type(exc).__name__, exc,
                 )
                 client_rows = []
             if client_rows:
                 logger.info(
-                    "client %s retrouvé via mapping WhatsApp→CRM (phone=%s)",
-                    mapping["crm_client_id"], from_phone,
+                    "client %s retrouvé via correspondance numéro→client (phone=%s)",
+                    mapped_client_id, from_phone,
                 )
             else:
                 logger.warning(
-                    "mapping WhatsApp→CRM périmé : idclient=%s introuvable (phone=%s)",
-                    mapping["crm_client_id"], from_phone,
+                    "correspondance numéro→client périmée : idclient=%s introuvable (phone=%s)",
+                    mapped_client_id, from_phone,
                 )
 
     client_row = client_rows[0] if client_rows else None

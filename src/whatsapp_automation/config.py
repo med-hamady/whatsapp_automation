@@ -87,22 +87,13 @@ AI_OCR_DATASET_PATH = _get(
 
 # Base SQLite dédiée aux paiements reçus d'un numéro non reconnu (client_not_found).
 # Préserve les données structurées (montant, txn_id, sample_id...) pour permettre
-# un rattachement/retraitement manuel ultérieur depuis le dashboard — distincte
-# d'events.db (simple cache de logs) et de PostgreSQL (schéma clients intouché).
+# un rattachement manuel ultérieur depuis le dashboard, ET sert de mémoire pour
+# que les paiements futurs du même numéro soient résolus automatiquement (cf.
+# unknown_clients_store.find_client_id_for_phone) — distincte d'events.db
+# (simple cache de logs) et de PostgreSQL (schéma clients intouché).
 UNKNOWN_CLIENTS_DB_PATH = _get(
     "UNKNOWN_CLIENTS_DB_PATH",
     str(_DATA_DIR / "unknown_clients.db"),
-)
-
-# Base SQLite des correspondances numéro WhatsApp → idclient CRM apprises via
-# le dashboard (reçu "client introuvable" rattaché manuellement par identifiant
-# CRM). Écrite par le dashboard UNIQUEMENT quand le paiement confirmé atteint
-# le statut 'queued' (jamais à la simple association) ; lue par le webhook
-# comme REPLI uniquement, quand le lookup PostgreSQL par téléphone n'a rien
-# donné — elle ne remplace jamais le lookup normal.
-WHATSAPP_CRM_MAPPINGS_DB_PATH = _get(
-    "WHATSAPP_CRM_MAPPINGS_DB_PATH",
-    str(_DATA_DIR / "whatsapp_crm_mappings.db"),
 )
 
 N_WORKERS = int(_get("N_WORKERS", "2"))

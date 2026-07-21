@@ -1,11 +1,11 @@
 """Construction du Job, partagée entre le webhook et la confirmation dashboard.
 
-Extrait de `pipeline.py` (Phase 4B-1) : la logique de lookup UCRM (avec retry),
-de répartition paiement/abonnements suspendus (quels MAC débloquer) et
+Extrait de `pipeline.py` : la logique de lookup UCRM (avec retry), de
+répartition paiement/abonnements suspendus (quels MAC débloquer) et
 d'assemblage du `Job` final était dupliquée en un seul bloc dans le pipeline
-webhook. Elle est isolée ici pour être réutilisée telle quelle par la future
-confirmation dashboard (Phase 4B-2), sans dupliquer ni simplifier les règles
-existantes (multi-abonnements, repli MAC local, repli mono-abo historique).
+webhook. Elle est isolée ici pour être réutilisée telle quelle par la
+confirmation dashboard, sans dupliquer ni simplifier les règles existantes
+(multi-abonnements, repli MAC local, repli mono-abo historique).
 
 Le pipeline webhook (flux normal UltraMsg) et la confirmation dashboard
 partagent : `ucrm_with_retry`, `fetch_ucrm_context`, `compute_unblock_plan`,
@@ -239,8 +239,8 @@ def build_job(
     `phone_for_worker` (Job.client.phone) et `wnum` (Job.source.wnum) sont
     fournis séparément par l'appelant : le flux webhook normal les dérive
     tous deux de from_phone/body_phone (et ils peuvent différer, cf.
-    pipeline.process) ; la confirmation dashboard (Phase 4B-2) fixe les deux
-    à `original_phone`.
+    pipeline.process) ; la confirmation dashboard fixe les deux à
+    `whatsapp_phone` (numéro d'origine du ticket `numeros_introuvable`).
     """
     was_suspended = client_row.get("statu") == 2
     return Job(

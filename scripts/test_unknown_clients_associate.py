@@ -9,17 +9,18 @@ Vérifie :
   - identifiant CRM non trouvé dans PostgreSQL -> 404, statut reste 'pending',
     error_message renseigné ;
   - identifiant trouvé -> statut 'associated', client_id stocké,
-    entered_phone reste NULL (plus de saisie téléphone), subscription_phone
-    dérivé du champ `info` (informatif), associated_at renseigné ;
+    whatsapp_phone INCHANGÉ (déjà connu depuis la création du ticket),
+    associated_at renseigné ;
   - aperçu complet : nom, nombre d'abonnements, liste des abonnements
     (MAC/IP/statut/info) — cas multi-abonnements couvert ;
-  - AUCUNE correspondance whatsapp_crm_mappings créée à l'association — la
-    mémoire n'est écrite qu'une fois le paiement en file (statut 'queued',
-    décision Ali ; couvert par test_unknown_clients_confirm.py) ;
+  - la résolution automatique des paiements futurs (find_client_id_for_phone)
+    reste vide après l'association seule — elle n'est effective qu'une fois
+    le paiement en file (statut 'queued' ; couvert par
+    test_unknown_clients_confirm.py) ;
   - ré-association vers un AUTRE identifiant CRM (statut 'associated')
-    autorisée, toujours sans correspondance créée ;
+    autorisée, toujours sans résolution effective ;
   - statut 'queued' -> ré-association refusée (409) ;
-  - enregistrement sans original_phone -> association OK ;
+  - enregistrement sans whatsapp_phone -> association OK ;
   - le lookup passe par pg.get_client_by_id — JAMAIS get_clients_by_phone
     (patché pour lever si appelé) ;
   - aucun Job créé (jobqueue.store.enqueue jamais appelé) ;
@@ -39,7 +40,6 @@ from __future__ import annotations
 
 import io
 import os
-import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -54,19 +54,16 @@ sys.path.insert(0, str(ROOT / "src"))
 # fixés AVANT le premier import de whatsapp_automation (config lit l'env à l'import).
 _TMP = Path(tempfile.mkdtemp(prefix="uc_associate_test_"))
 os.environ["UNKNOWN_CLIENTS_DB_PATH"] = str(_TMP / "unknown_clients.db")
-os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"] = str(_TMP / "whatsapp_crm_mappings.db")
 os.environ["EVENTS_DB_PATH"] = str(_TMP / "events.db")
 os.environ["QUEUE_DB_PATH"] = str(_TMP / "queue.db")
 os.environ["DASHBOARD_PASSWORD"] = "test-password-crm-assoc"
 
 from whatsapp_automation.db import postgres as pg  # noqa: E402
 from whatsapp_automation.jobqueue import store as queue_store  # noqa: E402
-from whatsapp_automation.webhook import crm_mappings  # noqa: E402
 from whatsapp_automation.webhook.dashboard import unknown_clients_store as store  # noqa: E402
 from whatsapp_automation.worker import mikrotik, ucrm, ultramsg  # noqa: E402
 
 DB = os.environ["UNKNOWN_CLIENTS_DB_PATH"]
-MAP_DB = os.environ["WHATSAPP_CRM_MAPPINGS_DB_PATH"]
 
 SAMPLE_OK = "2026-07-13/33333333333333333333333333333333"
 SAMPLE_NO_TXN = "2026-07-13/44444444444444444444444444444444"
@@ -119,7 +116,7 @@ def seed() -> tuple[int, int, int]:
         amount=1200,
         date_heure="2026-07-13 08:00:00",
         operator="bankily",
-        original_phone="37600099",
+        whatsapp_phone="37600099",
         body_phone=None,
         group_id=None,
         raw_text="reçu bankily 1200 MRU",
@@ -131,7 +128,7 @@ def seed() -> tuple[int, int, int]:
         amount=500,
         date_heure="2026-07-13 09:00:00",
         operator="masrivi",
-        original_phone="46600088",
+        whatsapp_phone="46600088",
         body_phone=None,
         group_id=None,
         raw_text="reçu masrivi 500 MRU (txn manquant)",
@@ -143,7 +140,7 @@ def seed() -> tuple[int, int, int]:
         amount=900,
         date_heure="2026-07-13 10:00:00",
         operator="sedad",
-        original_phone="",
+        whatsapp_phone="",
         body_phone=None,
         group_id="120363000000000000",
         raw_text="reçu sedad 900 MRU (expéditeur groupe non résolu)",
@@ -162,16 +159,6 @@ def test_migration_preserves_existing_records() -> None:
           len(before) == len(after))
     check("les colonnes d'association existent et valent None sur les lignes fraîches",
           all(r.get("client_id") is None for r in after))
-
-
-def _mapping_rows(phone: str) -> list[dict]:
-    with sqlite3.connect(MAP_DB) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM whatsapp_crm_mappings WHERE whatsapp_phone = ? ORDER BY id",
-            (phone,),
-        ).fetchall()
-    return [dict(r) for r in rows]
 
 
 def test_routes(id_ok: int, id_no_txn: int, id_no_phone: int) -> None:
@@ -240,8 +227,8 @@ def test_routes(id_ok: int, id_no_txn: int, id_no_phone: int) -> None:
         check("identifiant non trouvé : statut reste 'pending' (pas 'associated')",
               rec["status"] == "pending")
         check("identifiant non trouvé : error_message renseigné", bool(rec.get("error_message")))
-        check("identifiant non trouvé : aucune correspondance créée",
-              crm_mappings.get_active_mapping("37600099", db_path=MAP_DB) is None)
+        check("identifiant non trouvé : aucune résolution créée",
+              store.find_client_id_for_phone("37600099", db_path=DB) is None)
 
         # 7. Identifiant CRM trouvé -> association réussie.
         stats_before = queue_store.stats()
@@ -270,39 +257,31 @@ def test_routes(id_ok: int, id_no_txn: int, id_no_phone: int) -> None:
               and subs[0].get("status") == "suspended"
               and subs[1].get("status") == "active",
               str(subs))
-        check("client_preview.subscription_phone dérivé de info ('37697850')",
-              preview.get("subscription_phone") == "37697850")
-
         # Statut persistant en SQLite.
         rec = store.get_by_id(id_ok, db_path=DB)
         check("enregistrement SQLite : status='associated'", rec["status"] == "associated")
         check("enregistrement SQLite : client_id='555'", rec["client_id"] == "555")
-        check("enregistrement SQLite : entered_phone reste NULL (plus de saisie téléphone)",
-              rec["entered_phone"] is None)
-        check("enregistrement SQLite : subscription_phone dérivé de info",
-              rec["subscription_phone"] == "37697850")
-        check("enregistrement SQLite : mac_address (aperçu) stocké",
-              rec["mac_address"] == "AA:BB:CC:DD:EE:FF")
+        check("enregistrement SQLite : whatsapp_phone inchangé (posé à la création du ticket)",
+              rec["whatsapp_phone"] == "37600099")
         check("enregistrement SQLite : associated_at renseigné", rec["associated_at"] is not None)
 
-        # 9. AUCUNE correspondance WhatsApp -> CRM créée à l'association
-        # (décision Ali : la mémoire n'est écrite qu'au statut 'queued' —
-        # une association abandonnée ne doit jamais router les reçus futurs).
-        check("aucune correspondance créée à l'association",
-              crm_mappings.get_active_mapping("37600099", db_path=MAP_DB) is None)
+        # 9. La résolution automatique (find_client_id_for_phone) reste vide
+        # après la seule association : elle n'est effective qu'au statut
+        # 'queued' — une association abandonnée ne doit jamais router les
+        # reçus futurs.
+        check("aucune résolution effective à l'association",
+              store.find_client_id_for_phone("37600099", db_path=DB) is None)
         check("réponse : pas de champ mapping", data.get("mapping") is None)
 
         # 10. Ré-association corrective (statut 'associated') vers un autre
-        # identifiant : autorisée, toujours sans correspondance créée.
+        # identifiant : autorisée, toujours sans résolution effective.
         r = client.post(f"/dashboard/api/unknown-clients/{id_ok}/associate",
                         json={"crm_client_id": 777})  # int JSON accepté aussi
         check(f"ré-association 'associated' -> 200 ({r.status_code})", r.status_code == 200, r.text)
         rec = store.get_by_id(id_ok, db_path=DB)
         check("ré-association : client_id mis à jour ('777')", rec["client_id"] == "777")
-        check("ré-association : toujours aucune correspondance",
-              crm_mappings.get_active_mapping("37600099", db_path=MAP_DB) is None)
-        check("table des correspondances vide pour ce numéro (aucun historique parasite)",
-              len(_mapping_rows("37600099")) == 0)
+        check("ré-association : toujours aucune résolution effective",
+              store.find_client_id_for_phone("37600099", db_path=DB) is None)
 
         # 11. Statut 'queued' -> ré-association refusée (jamais changer le
         # client d'un paiement déjà engagé).
@@ -314,11 +293,11 @@ def test_routes(id_ok: int, id_no_txn: int, id_no_phone: int) -> None:
         rec = store.get_by_id(id_ok, db_path=DB)
         check("statut 'queued' : client_id inchangé ('777')", rec["client_id"] == "777")
 
-        # 12. Enregistrement sans original_phone : association OK (la mémoire
+        # 12. Enregistrement sans whatsapp_phone : association OK (la mémoire
         # n'est de toute façon écrite qu'au statut 'queued').
         r = client.post(f"/dashboard/api/unknown-clients/{id_no_phone}/associate",
                         json={"crm_client_id": "555"})
-        check(f"record sans original_phone -> association 200 ({r.status_code})",
+        check(f"record sans whatsapp_phone -> association 200 ({r.status_code})",
               r.status_code == 200, r.text)
 
         # 13. Aucun Job créé (la queue n'a pas bougé — enqueue est patché pour
@@ -336,7 +315,6 @@ def test_routes(id_ok: int, id_no_txn: int, id_no_phone: int) -> None:
 
 def main() -> int:
     queue_store.init_db()
-    crm_mappings.init_db(MAP_DB)
     _patch_forbidden_calls()
     id_ok, id_no_txn, id_no_phone = seed()
     test_migration_preserves_existing_records()
