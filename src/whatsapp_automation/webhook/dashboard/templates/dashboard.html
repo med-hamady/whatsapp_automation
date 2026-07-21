@@ -248,7 +248,6 @@
             WhatsApp afin de réduire les cas de clients introuvables.<br><br>
             Veuillez vérifier les informations avant de continuer.
           </div>
-          <div id="ucTxnWarn"></div>
           <label class="muted" style="font-size:12px; display:block; margin-top:14px;">
             Identifiant CRM du client
           </label>
@@ -684,7 +683,6 @@
       document.getElementById("ucCrmInput").disabled = false;
       document.getElementById("ucVerifyBtn").disabled = false;
       document.getElementById("ucVerifyMsg").innerHTML = "";
-      document.getElementById("ucTxnWarn").innerHTML = "";
       document.getElementById("ucClientPreview").style.display = "none";
       document.getElementById("ucClientPreview").innerHTML = "";
       document.getElementById("ucAssocActions").style.display = "none";
@@ -727,11 +725,6 @@
         d.status === "queued" ? `<div><b>Job :</b> ${d.job_id || "—"}</div>` : "",
       ].join("");
 
-      document.getElementById("ucTxnWarn").innerHTML = d.txn_id ? "" : `<div class="warn-box">
-        ⚠️ Transaction (txn_id) manquante sur ce reçu : une association / un paiement
-        automatique ne peut pas être fait en toute sécurité sans elle. L'association
-        reste désactivée pour cet enregistrement.</div>`;
-
       if (d.sample_date && d.sample_sid) {
         const src = `${BASE}/api/sample_image?date=${d.sample_date}&sid=${d.sample_sid}`;
         document.getElementById("ucImageWrap").innerHTML =
@@ -743,8 +736,6 @@
       document.getElementById("ucRaw").textContent = d.raw_text || "—";
 
       document.getElementById("ucAssocBox").style.display = d.status === "pending" ? "" : "none";
-      document.getElementById("ucCrmInput").disabled = !d.txn_id;
-      document.getElementById("ucVerifyBtn").disabled = !d.txn_id;
 
       document.getElementById("ucConfirmBox").style.display = d.status === "associated" ? "" : "none";
       document.getElementById("ucConfirmingBox").style.display = d.status === "confirming" ? "" : "none";

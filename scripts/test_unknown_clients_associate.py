@@ -4,7 +4,9 @@
 Vérifie :
   - auth session obligatoire (401 sans session) ;
   - id inconnu -> 404 ;
-  - enregistrement sans txn_id -> refus (409) ;
+  - enregistrement sans txn_id -> association ACCEPTÉE (certains opérateurs
+    comme masrivi/generic n'ont structurellement pas de txn_id extractible ;
+    le flux webhook normal les traite déjà sans blocage, cf. jobqueue/schema.sql) ;
   - identifiant CRM invalide ("abc", "0", "-5") -> refus (400) ;
   - identifiant CRM non trouvé dans PostgreSQL -> 404, statut reste 'pending',
     error_message renseigné ;
@@ -204,13 +206,15 @@ def test_routes(id_ok: int, id_no_txn: int, id_no_phone: int) -> None:
                         json={"crm_client_id": "555"})
         check("id inconnu -> 404", r.status_code == 404)
 
-        # 4. Enregistrement sans txn_id -> refus.
+        # 4. Enregistrement sans txn_id -> association ACCEPTÉE (masrivi/generic
+        # n'ont structurellement pas de txn_id ; le flux normal les traite déjà
+        # sans blocage, l'association ne doit pas être plus stricte que lui).
         r = client.post(f"/dashboard/api/unknown-clients/{id_no_txn}/associate",
                         json={"crm_client_id": "555"})
-        check(f"record sans txn_id -> refusé ({r.status_code})", r.status_code in (400, 409))
+        check(f"record sans txn_id -> association 200 ({r.status_code})",
+              r.status_code == 200, r.text)
         rec = store.get_by_id(id_no_txn, db_path=DB)
-        check("record sans txn_id : statut toujours 'pending' (pas touché)",
-              rec["status"] == "pending")
+        check("record sans txn_id : statut 'associated'", rec["status"] == "associated")
 
         # 5. Identifiant CRM invalide -> 400 (non numérique, zéro, négatif).
         for bad in ("abc", "0", "-5", "", "12 34"):

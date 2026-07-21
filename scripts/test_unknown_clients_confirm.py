@@ -4,7 +4,8 @@ Vérifie :
   1. sans session -> 401 ;
   2. id inconnu -> 404 ;
   3. statut 'pending' -> 409 ;
-  4. txn_id manquant -> 409 ;
+  4. txn_id manquant -> confirmation ACCEPTÉE (masrivi/generic n'ont
+     structurellement pas de txn_id ; le flux normal les traite déjà) ;
   5. amount/whatsapp_phone/client_id manquants -> 409 chacun ;
   6. réservation atomique (reserve_for_confirmation) empêche 2 confirmations
      concurrentes du même enregistrement ;
@@ -233,13 +234,22 @@ def test_auth_and_basic_status_gates() -> None:
         check("3. statut 'pending' -> 409", r.status_code == 409)
         check("3bis. statut inchangé après refus", store.get_by_id(pending_id, db_path=DB)["status"] == "pending")
 
-        # 4. txn_id manquant -> 409.
-        no_txn_id = seed_associated(idclient=702, txn_id="TXNTMP")
+        # 4. txn_id manquant -> confirmation ACCEPTÉE (masrivi/generic n'ont
+        # structurellement pas de txn_id extractible ; le flux webhook normal
+        # les traite déjà sans blocage, la confirmation ne doit pas être plus
+        # stricte que lui).
+        no_txn_id = seed_associated(idclient=702, whatsapp_phone="37600002", txn_id="TXNTMP")
         _force_field(no_txn_id, txn_id=None)
+        FAKE_PG_BY_ID[702] = [client_row(702, "NOTXN:MAC:01", statu=2)]
+        FAKE_UCRM_DETAILS[702] = {"balance": 1500, "account_credit": 0}
+        FAKE_UCRM_SERVICES[702] = [svc("NOTXN:MAC:01", 1500)]
         r = client.post(f"/dashboard/api/unknown-clients/{no_txn_id}/confirm")
-        check("4. txn_id manquant -> 409", r.status_code == 409)
-        check("4bis. statut reste 'associated' (pas de réservation)",
-              store.get_by_id(no_txn_id, db_path=DB)["status"] == "associated")
+        check("4. txn_id manquant -> confirm 200", r.status_code == 200, r.text)
+        check("4bis. statut 'queued' malgré l'absence de txn_id",
+              store.get_by_id(no_txn_id, db_path=DB)["status"] == "queued")
+        drained = queue_store.claim_next("test-worker-notxn")
+        check("4ter. job sans txn_id drainé normalement (txn_id stocké vide)",
+              drained is not None and drained["job"].payment.txn_id == "")
 
         # 5a. amount manquant -> 409.
         no_amount = seed_associated(idclient=703, txn_id="TXNAMT")
@@ -265,7 +275,7 @@ def test_auth_and_basic_status_gates() -> None:
         r = client.post(f"/dashboard/api/unknown-clients/{no_client_id}/confirm")
         check("5d. client_id manquant -> 409", r.status_code == 409)
 
-        # Toutes les confirmations refusées ci-dessus (gates 3→5d, même
+        # Toutes les confirmations refusées ci-dessus (gates 3, 5a→5d, même
         # whatsapp_phone par défaut) ne doivent avoir rendu AUCUNE résolution
         # automatique effective : elle ne l'est qu'au statut 'queued'.
         check("gates refusées : aucune résolution effective avant 'queued'",

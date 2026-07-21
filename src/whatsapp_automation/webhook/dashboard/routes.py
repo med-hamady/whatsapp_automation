@@ -381,11 +381,10 @@ def api_unknown_client_associate(id: int, body: AssociateBody):
             detail=f"Statut invalide pour association : {row['status']}",
         )
 
-    if not row.get("txn_id"):
-        raise HTTPException(
-            status_code=409,
-            detail="Ce reçu ne contient pas de txn_id fiable. Traitement automatique refusé.",
-        )
+    # txn_id absent accepté : certains opérateurs (masrivi, generic) n'ont
+    # structurellement pas de txn_id extractible (cf. jobqueue/schema.sql) et
+    # sont pourtant traités normalement par le flux webhook — un ticket
+    # `numeros_introuvable` ne doit pas être plus restrictif que lui.
 
     raw = str(body.crm_client_id).strip()
     if not raw.isdigit() or int(raw) <= 0:
@@ -582,9 +581,8 @@ async def api_unknown_client_confirm(id: int):
         )
 
     # Préconditions strictes — refusées AVANT toute réservation (aucun état
-    # SQLite touché si l'une d'elles échoue).
-    if not row.get("txn_id"):
-        raise HTTPException(status_code=409, detail="txn_id manquant sur ce reçu.")
+    # SQLite touché si l'une d'elles échoue). txn_id absent accepté (cf.
+    # gate retiré dans associate() : certains opérateurs n'en ont jamais).
     amount = row.get("amount")
     if not amount or amount <= 0:
         raise HTTPException(status_code=409, detail="Montant manquant ou invalide.")
