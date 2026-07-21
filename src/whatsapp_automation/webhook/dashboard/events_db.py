@@ -203,6 +203,18 @@ def timeseries(days: int = 30, start: Optional[str] = None,
     }
 
 
+def payments_by_operator(days: Optional[int] = 30, start: Optional[str] = None,
+                         end: Optional[str] = None, db_path: Optional[str] = None) -> dict:
+    """Nombre de paiements créés (ucrm_created) par opérateur (bankily/sedad/masrvi…)."""
+    since, until = _range(days, start, end)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(NULLIF(operator,''),'?') op, COUNT(*) n FROM events "
+            "WHERE ts>=? AND ts<=? AND type='ucrm_created' GROUP BY op ORDER BY n DESC",
+            (since, until)).fetchall()
+    return {r["op"]: r["n"] for r in rows}
+
+
 def recent_events(
     limit: int = 150,
     type_filter: Optional[str] = None,

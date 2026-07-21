@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from .. import __version__, config
 from ..db import postgres as pg
 from ..jobqueue import store as queue_store
-from ..worker import mikrotik, ucrm
+from ..worker import fai_supervisor, mikrotik, ucrm
 from . import pipeline
 from .dashboard import router as dashboard_router
 from .dashboard import events_db
@@ -154,9 +154,14 @@ async def _safe_call(coro):
 async def _device_status(row: dict) -> dict:
     """État réseau d'un abonnement/équipement local (1 ligne `client`).
 
-    Combine les infos locales (mac, ip, statu) avec l'état de blocage Mikrotik.
+    Combine les infos locales (mac, ip, statu) avec l'état de blocage des DEUX
+    mécanismes de coupure : le firewall MikroTik et le superviseur LR. Un client
+    peut être coupé par l'un sans l'autre, donc ``is_blocked`` est vrai dès que
+    l'un des deux le bloque ; ``blocked_mikrotik`` / ``blocked_supervisor``
+    détaillent lequel.
+
     Les MAC placeholder ``pending-XXXX`` (client sans MAC réel en UCRM) et les
-    MAC vides ne déclenchent pas d'appel routeur — is_blocked reste False.
+    MAC vides ne déclenchent aucun appel externe — is_blocked reste False.
     """
     mac = (row.get("mac") or "").strip()
     base = {
@@ -165,16 +170,47 @@ async def _device_status(row: dict) -> dict:
         "statu_local": row.get("statu"),
     }
     if not mac or mac.lower().startswith("pending-"):
-        return {**base, "is_blocked": False, "block_rule_count": 0, "error": None}
+        return {
+            **base,
+            "is_blocked": False,
+            "block_rule_count": 0,
+            "blocked_mikrotik": False,
+            "blocked_supervisor": False,
+            "block_mode": None,
+            "error": None,
+        }
 
-    res = await _safe_call(mikrotik.get_block_status_by_mac(mac))
-    block = res["data"] or {}
+    mk_res, sup_res = await asyncio.gather(
+        _safe_call(mikrotik.get_block_status_by_mac(mac)),
+        _fai_status(mac),
+    )
+    block = mk_res["data"] or {}
+    sup = sup_res["data"] or {}
+
+    blocked_mk = block.get("is_blocked")
+    blocked_sup = sup.get("client_blocked")
+    errors = [e for e in (mk_res["error"], sup_res["error"]) if e]
+
     return {
         **base,
-        "is_blocked": block.get("is_blocked"),
+        "is_blocked": bool(blocked_mk) or bool(blocked_sup),
         "block_rule_count": block.get("block_rule_count"),
-        "error": res["error"],
+        "blocked_mikrotik": blocked_mk,
+        "blocked_supervisor": blocked_sup,
+        "block_mode": sup.get("block_mode"),
+        "error": "; ".join(errors) if errors else None,
     }
+
+
+async def _fai_status(mac: str):
+    """État superviseur d'une MAC, jamais bloquant.
+
+    Superviseur non configuré → ``{data: None}`` sans appel réseau : la réponse
+    du lookup reste alors celle d'avant (MikroTik seul).
+    """
+    if not fai_supervisor.enabled():
+        return {"data": None, "error": None}
+    return await _safe_call(fai_supervisor.get_status_by_mac(mac))
 
 
 @app.get("/api/clients/lookup")
@@ -270,12 +306,20 @@ async def block_client(
     body: BlockRequest,
     x_admin_key: str = Header(default="", alias="X-Admin-Key"),
 ):
-    """Bloque ou débloque un abonnement (MAC) d'un client sur le routeur.
+    """Bloque ou débloque un abonnement (MAC) d'un client sur le réseau.
 
     Action d'écriture protégée par une clé ADMIN distincte (header X-Admin-Key).
-    Le MAC doit appartenir au téléphone fourni (validation anti-abus). On agit
-    d'abord sur le routeur, puis on aligne le statut local (statu 2=bloqué /
-    0=actif). Si le routeur échoue, le statut local n'est PAS modifié (502).
+    Le MAC doit appartenir au téléphone fourni (validation anti-abus).
+
+    Le BLOCAGE ne concerne que le firewall MikroTik : couper un client est la
+    prérogative du superviseur réseau, pas du système de paiement. Le DEBLOCAGE,
+    lui, lève les deux coupures possibles (MikroTik + superviseur LR), puisqu'un
+    client a pu être coupé par l'un ou par l'autre.
+
+    MikroTik reste bloquant (échec → 502, le statut local n'est pas modifié) ; le
+    superviseur, lui, n'est pas bloquant : son résultat (ou son erreur) est
+    rapporté dans ``supervisor``, car un 404 (MAC hors parc supervisé) ou un 409
+    (LR en bridge) ne doivent pas annuler le déblocage MikroTik déjà appliqué.
     """
     if not config.ADMIN_API_KEY or x_admin_key != config.ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="invalid_admin_key")
@@ -318,12 +362,18 @@ async def block_client(
             detail=f"mikrotik_error: {type(exc).__name__}: {exc}"[:200],
         )
 
+    # Déblocage seulement : le système de paiement ne pose jamais de coupure
+    # sur le superviseur — c'est la prérogative de l'équipe réseau.
+    supervisor = await _fai_unblock(db_mac) if action == "unblock" else None
+
     rows = pg.update_client_status_by_mac(db_mac, new_statu)
     status_after = await mikrotik.get_block_status_by_mac(db_mac)
 
     logger.info(
-        "block_client OK phone=%s mac=%s action=%s rules_changed=%d statu=%d",
+        "block_client OK phone=%s mac=%s action=%s rules_changed=%d statu=%d "
+        "supervisor_ok=%s supervisor_err=%s",
         norm, db_mac, action, rules_changed, new_statu,
+        (supervisor or {}).get("ok"), (supervisor or {}).get("error"),
     )
     return {
         "phone": norm,
@@ -334,4 +384,25 @@ async def block_client(
         "local_rows_updated": rows,
         "is_blocked": status_after.get("is_blocked"),
         "block_rule_count": status_after.get("block_rule_count"),
+        "supervisor": supervisor,
     }
+
+
+async def _fai_unblock(mac: str) -> dict | None:
+    """Lève la coupure superviseur pour cette MAC, sans jamais lever d'exception.
+
+    Retourne ``None`` si le superviseur n'est pas configuré, sinon sa réponse
+    enrichie d'un champ ``error`` (``None`` si tout s'est bien passé).
+
+    Rappel : ``ok: false`` n'est PAS un échec — le LR est injoignable à cet
+    instant, l'ordre est enregistré et ré-appliqué automatiquement. C'est
+    ``client_blocked`` qui porte l'intention.
+    """
+    if not fai_supervisor.enabled():
+        return None
+    try:
+        return {**await fai_supervisor.unblock_by_mac(mac), "error": None}
+    except fai_supervisor.FaiSupervisorError as exc:
+        logger.error("block_client superviseur unblock ECHEC mac=%s http=%s err=%s",
+                     mac, exc.status_code, exc)
+        return {"ok": False, "http_status": exc.status_code, "error": str(exc)[:200]}

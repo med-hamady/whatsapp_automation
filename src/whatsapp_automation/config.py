@@ -49,6 +49,24 @@ MIKROTIK_USER = _get("MIKROTIK_USER", "Suspension")
 MIKROTIK_PASSWORD = _get("MIKROTIK_PASSWORD", "")
 MIKROTIK_TIMEOUT = float(_get("MIKROTIK_TIMEOUT", "15"))
 
+# Superviseur réseau (API FAI) : second mécanisme de blocage/déblocage, appliqué
+# directement sur le LR du client (SSH) et ré-appliqué toutes les 120 s côté
+# superviseur. Coexiste avec le firewall MikroTik : on agit sur les deux.
+# Sans URL + clé, le client est désactivé (no-op) — c'est le défaut en dev/tests.
+FAI_API_BASE_URL = _get("FAI_API_BASE_URL", "")
+FAI_API_KEY = _get("FAI_API_KEY", "")
+# Timeout des ACTIONS (unblock) : l'équipe réseau impose >= 60 s, car l'appel
+# attend la réponse réelle du LR du client avant de répondre. Un timeout court
+# ferait conclure à un échec alors que l'ordre a bien été exécuté.
+FAI_API_TIMEOUT = float(_get("FAI_API_TIMEOUT", "90"))
+# Timeout de la LECTURE (status) : cet appel ne sollicite pas le LR et il est fait
+# en direct dans /api/clients/lookup — on le garde court pour ne pas figer la
+# consultation d'une fiche client si le superviseur rame.
+FAI_API_STATUS_TIMEOUT = float(_get("FAI_API_STATUS_TIMEOUT", "15"))
+# Le superviseur présente un certificat auto-signé : la vérification TLS est
+# désactivée POUR CET HÔTE uniquement (la connexion reste chiffrée).
+FAI_API_VERIFY_SSL = _get("FAI_API_VERIFY_SSL", "false").lower() in ("1", "true", "yes")
+
 ULTRAMSG_BASE_URL = _get("ULTRAMSG_BASE_URL", "http://127.0.0.1:9003")
 ULTRAMSG_INSTANCE = _get("ULTRAMSG_INSTANCE", "instance62746")
 ULTRAMSG_TOKEN = _get("ULTRAMSG_TOKEN", "fake-token")
