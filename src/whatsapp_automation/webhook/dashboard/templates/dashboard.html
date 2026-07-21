@@ -152,6 +152,9 @@
     <div class="section-title">Vue d'ensemble</div>
     <div class="grid" id="kpis"></div>
 
+    <div class="section-title" style="margin-top: 24px;">Paiements par opérateur</div>
+    <div class="grid" id="operators"></div>
+
     <div class="section-title" style="margin-top: 24px;">Analyse</div>
     <div class="charts">
       <div class="panel"><h2>Paiements refusés par cause</h2><canvas id="chartRefus"></canvas></div>
@@ -174,6 +177,7 @@
           <option value="refused">Paiement refusé</option>
           <option value="client_not_found">Client introuvable</option>
           <option value="underpayment">Sous-paiement</option>
+          <option value="payment_complete">Paiement complet</option>
           <option value="support_notified">Notif support</option>
           <option value="recipient_suspect">Destinataire suspect</option>
         </select>
@@ -331,7 +335,8 @@
       client_unblocked: ["Client débloqué", "b-ok"], subscription_activated: ["Abo réactivé", "b-ok"],
       payment_enqueued: ["Reçu validé", "b-info"], refused: ["Refusé", "b-refused"],
       client_not_found: ["Client introuvable", "b-warn"],
-      underpayment: ["Sous-paiement", "b-warn"], support_notified: ["Notif support", "b-warn"],
+      underpayment: ["Sous-paiement", "b-warn"], payment_complete: ["Paiement complet", "b-ok"],
+      support_notified: ["Notif support", "b-warn"],
       recipient_suspect: ["Destinataire suspect", "b-warn"],
     };
 
@@ -391,6 +396,19 @@
       document.querySelectorAll("#kpis .kpi.clickable").forEach(el => {
         el.classList.toggle("active", el.dataset.type === cur);
       });
+    }
+
+    const OPERATOR_FR = { bankily: "Bankily", sedad: "Sedad", masrvi: "Masrvi",
+                          generic: "Autre / non typé", "?": "Inconnu" };
+    async function loadOperators() {
+      const data = await api(`/api/operators?${timeQS()}`);
+      const colors = ["green", "blue", "amber", "red", ""];
+      const entries = Object.entries(data);
+      document.getElementById("operators").innerHTML = entries.length
+        ? entries.map(([op, n], i) => `<div class="kpi clickable" data-op="${op}">
+            <div class="label">${OPERATOR_FR[op] || op}</div>
+            <div class="value ${colors[i % colors.length]}">${n}</div></div>`).join("")
+        : `<div class="kpi"><div class="label">Aucun paiement</div><div class="value">0</div></div>`;
     }
 
     async function loadRefus() {
@@ -960,7 +978,9 @@
 
     async function refreshAll() {
       try {
-        await Promise.all([loadSummary(), loadRefus(), loadTime(), runSearch(), loadUnknownClients()]);
+        await Promise.all([
+          loadSummary(), loadOperators(), loadRefus(), loadTime(), runSearch(), loadUnknownClients(),
+        ]);
         document.getElementById("updated").textContent =
           "Mis à jour " + new Date().toLocaleTimeString("fr-FR");
       } catch (_) { /* 401 gère le reload */ }
@@ -988,6 +1008,17 @@
     });
 
     // Changer la période efface une éventuelle plage de dates (priorité claire).
+    // Clic sur un opérateur → filtre les paiements créés de cet opérateur.
+    document.getElementById("operators").addEventListener("click", (e) => {
+      const card = e.target.closest(".kpi.clickable");
+      if (!card) return;
+      document.getElementById("typeFilter").value = "ucrm_created";
+      document.getElementById("search").value = card.dataset.op;
+      highlightCards();
+      runSearch();
+      document.querySelector("table").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+
     document.getElementById("period").addEventListener("change", () => {
       document.getElementById("dateFrom").value = "";
       document.getElementById("dateTo").value = "";

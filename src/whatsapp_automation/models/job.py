@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 class Client(BaseModel):
     id: int
     phone: str                            # ex "37697850" sans indicatif
+    name: Optional[str] = None            # nom parsé depuis le champ `info` ("<phone>-<nom>") ; None si indisponible
     mac_address: Optional[str] = None     # ex "AA:BB:CC:DD:EE:FF" — None si client jamais provisionné MikroTik
     ip_address: Optional[str] = None      # IP attribuée au client (sert au déblocage MikroTik)
     current_status: str                   # "suspended" | "active"

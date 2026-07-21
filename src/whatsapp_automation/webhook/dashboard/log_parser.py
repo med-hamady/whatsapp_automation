@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from whatsapp_automation import config
+
 logger = logging.getLogger("whatsapp_automation.webhook.dashboard")
 
 
@@ -42,7 +44,11 @@ PAYMENT_ENQUEUED = "payment_enqueued"     # reçu validé → empilé en queue
 UCRM_CREATED = "ucrm_created"             # paiement créé dans le CRM (UCRM)
 CLIENT_UNBLOCKED = "client_unblocked"     # déblocage MikroTik (par le worker)
 SUBSCRIPTION_ACTIVATED = "subscription_activated"  # statut abo → actif
-UNDERPAYMENT = "underpayment"             # sous-paiement : enregistré, non débloqué
+UNDERPAYMENT = "underpayment"             # sous-paiement RÉEL : écart > tolérance
+PAYMENT_COMPLETE = "payment_complete"     # paiement complet (écart ≤ tolérance) : le
+                                          # worker loguait "sous-paiement" mais le
+                                          # compte était à jour (mislabel historique,
+                                          # cf. bug MAC UCRM absent / client déjà actif)
 MESSAGE_SENT = "message_sent"             # reçu PDF envoyé au client
 SUPPORT_NOTIFIED = "support_notified"     # notification envoyée au support
 
@@ -169,9 +175,16 @@ MESSAGE_PATTERNS: list[tuple[re.Pattern, Callable[[re.Match], dict]]] = [
      lambda m: _ev(type=CLIENT_UNBLOCKED, client_id=int(m.group("client")), mac=m.group("mac"))),
     (re.compile(r"^Statut abo mac=(?P<mac>\S+) \S+ actif \(lignes=(?P<n>\d+), client=(?P<client>\d+)\)"),
      lambda m: _ev(type=SUBSCRIPTION_ACTIVATED, mac=m.group("mac"), client_id=int(m.group("client")))),
+    # Le worker logue "sous-paiement" dès que should_unblock=False. Ce n'est un
+    # VRAI sous-paiement que si l'écart (dû - payé) dépasse la tolérance ; en
+    # deçà, le compte est à jour (mislabel) → on classe en PAYMENT_COMPLETE.
     (re.compile(r"^sous-paiement \(balance=(?P<bal>\d+) pay\w*=(?P<paid>\d+) \S+=(?P<ecart>-?\d+)\) "
                 r".*client=(?P<client>\d+)\)"),
-     lambda m: _ev(type=UNDERPAYMENT, client_id=int(m.group("client")), amount=int(m.group("paid")))),
+     lambda m: _ev(
+         type=(UNDERPAYMENT if int(m.group("ecart")) > config.UNDERPAYMENT_TOLERANCE
+               else PAYMENT_COMPLETE),
+         client_id=int(m.group("client")), amount=int(m.group("paid")),
+         balance=int(m.group("bal")))),
     (re.compile(r"^PDF envoy\w* via UltraMsg \S+ \+222(?P<phone>\S+) \(unblocked=(?P<ub>\w+)\)"
                 r"(?: url=(?P<url>\S+))?"),
      lambda m: _ev(type=MESSAGE_SENT, phone=m.group("phone"),

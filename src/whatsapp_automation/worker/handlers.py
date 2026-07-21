@@ -6,7 +6,7 @@ Aucune validation métier : déjà faite par le webhook avant l'enqueue.
 Ordre des étapes (chacune idempotente, repérée par step_done) :
   1. ucrm.create_payment    → paymentId
   2. db.insert_paiement     (DB locale)
-  3. mikrotik.remove_rule   (déblocage)
+  3. déblocage réseau       (firewall MikroTik + superviseur LR)
   4. db.update_client_status → actif (statu=0)
   5. ultramsg.send_document → PDF reçu envoyé au client (caption = détail montants)
 
@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from .. import config
 from ..db import postgres as pg
 from ..models import Job
-from . import mikrotik, ucrm, ultramsg
+from . import fai_supervisor, mikrotik, ucrm, ultramsg
 
 
 logger = logging.getLogger("whatsapp_automation.worker.handlers")
@@ -75,13 +75,80 @@ def _macs_to_unblock(job: Job) -> list[str]:
     return macs
 
 
+async def _unblock_mac(mac: str, client_id: int) -> None:
+    """Débloque une MAC sur les DEUX mécanismes de coupure.
+
+    1. Firewall MikroTik (règle drop sur le routeur core) — historique.
+    2. Superviseur LR (coupure appliquée sur le LR du client, en SSH) — nouveau.
+
+    Les deux sont idempotents, et un client peut avoir été coupé par l'un ou
+    l'autre : on lève les deux systématiquement.
+
+    Le paiement est déjà encaissé en UCRM quand on arrive ici. Une panne du
+    superviseur ne doit donc pas faire échouer (et rejouer) le job : on log
+    l'erreur — elle remonte sur le dashboard — et on continue. Côté superviseur,
+    404 (MAC hors parc supervisé) et 409 (LR en bridge) ne se résoudront de toute
+    façon jamais d'eux-mêmes ; ils appellent une action de l'équipe réseau, pas
+    un retry.
+    """
+    removed = await mikrotik.unblock_by_mac(mac)
+    logger.info("MikroTik unblock: client=%d mac=%s rules_removed=%d",
+                client_id, mac, removed)
+
+    if not fai_supervisor.enabled():
+        logger.debug("Superviseur LR non configuré — unblock ignoré (mac=%s)", mac)
+        return
+
+    try:
+        res = await fai_supervisor.unblock_by_mac(mac)
+    except fai_supervisor.FaiSupervisorError as exc:
+        logger.error("Superviseur LR unblock ECHEC: client=%d mac=%s http=%s err=%s",
+                     client_id, mac, exc.status_code, exc)
+        return
+
+    # `ok: false` n'est pas un échec : le LR est juste injoignable à cet instant,
+    # l'ordre est enregistré et le superviseur le ré-applique dès que le LR revient
+    # (`retry_scheduled`). C'est `client_blocked` qui fait foi, pas `ok`.
+    logger.info(
+        "Superviseur LR unblock: client=%d mac=%s ok=%s client_blocked=%s "
+        "retry_scheduled=%s name=%s msg=%s",
+        client_id, mac, res.get("ok"), res.get("client_blocked"),
+        res.get("retry_scheduled"), res.get("name"), res.get("message"),
+    )
+
+    # `unenforceable_reason` : le LR refuse la connexion — il n'y aura AUCUN
+    # rattrapage automatique. Le client resterait coupé sans qu'on le sache :
+    # c'est le seul cas d'unblock qui exige une intervention de l'équipe réseau.
+    reason = res.get("unenforceable_reason")
+    if reason:
+        logger.error(
+            "Superviseur LR NON APPLICABLE (à signaler à l'équipe réseau) : "
+            "client=%d mac=%s raison=%s — pas de rattrapage automatique, "
+            "le client reste coupé",
+            client_id, mac, reason,
+        )
+    elif res.get("client_blocked"):
+        logger.warning(
+            "Superviseur LR: client=%d mac=%s toujours marqué bloqué après unblock",
+            client_id, mac,
+        )
+    elif not res.get("ok"):
+        logger.info(
+            "Superviseur LR: application différée (LR injoignable, retry_scheduled=%s) "
+            "mac=%s", res.get("retry_scheduled"), mac,
+        )
+
+
 def _build_message_body(job: Job) -> str:
     """Construit le message WhatsApp envoyé au client après traitement.
 
-    3 montants sont toujours affichés (total dû / payé / reste). Le ton diffère
-    selon que le client est débloqué ou pas. Le sur-paiement ajoute une ligne
-    `Avoir` pour le crédit en surplus.
+    Le message débute par une salutation « Bonjour <nom> » (ou « Bonjour »
+    seul si le nom est indisponible). 3 montants sont toujours affichés
+    (total dû / payé / reste). Le ton diffère selon que le client est
+    débloqué ou pas. Le sur-paiement ajoute une ligne `Avoir` pour le
+    crédit en surplus.
     """
+    greeting = f"Bonjour {job.client.name}," if job.client.name else "Bonjour,"
     total = job.payment.crm_balance_before
     paid = job.payment.amount_mru
     diff = total - paid                # >0 reste, <0 sur-paiement
@@ -115,7 +182,7 @@ def _build_message_body(job: Job) -> str:
         header = "⚠ Paiement enregistré mais incomplet."
         footer = "Merci de compléter pour réactiver votre connexion."
 
-    return header + "\n\n" + "\n".join(lines) + "\n\n" + footer
+    return greeting + "\n\n" + header + "\n\n" + "\n".join(lines) + "\n\n" + footer
 
 
 def _should_skip(target_step: str, last_done: Optional[str]) -> bool:
@@ -204,9 +271,7 @@ async def process_job(
                            job.client.id, job.unblock_macs, job.client.mac_address)
         else:
             for mac in macs_to_unblock:
-                removed = await mikrotik.unblock_by_mac(mac)
-                logger.info("MikroTik unblock: client=%d mac=%s rules_removed=%d",
-                            job.client.id, mac, removed)
+                await _unblock_mac(mac, job.client.id)
         on_step_done(STEP_UNBLOCKED)
         result.completed_steps.append(STEP_UNBLOCKED)
 

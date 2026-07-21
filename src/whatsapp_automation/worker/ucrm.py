@@ -87,6 +87,42 @@ async def get_client_details(client_id: int) -> dict:
     }
 
 
+def _chiffres(valeur: str | None) -> str:
+    """Réduit un numéro à ses chiffres, sans l'indicatif 222 (comme phone.py)."""
+    digits = "".join(c for c in str(valeur or "") if c.isdigit())
+    if digits.startswith("222") and len(digits) > 8:
+        return digits[3:]
+    return digits
+
+
+async def find_client_id_by_phone(phone: str) -> int | None:
+    """Cherche un client UCRM par téléphone et retourne son id, ou None.
+
+    Sert de repli à /api/clients/lookup quand la DB locale ne connaît pas encore
+    le numéro (client créé dans le CRM mais pas encore synchronisé localement).
+
+    ``query`` est un recherche plein-texte UCRM : elle peut matcher sur le nom
+    ou l'adresse autant que sur le téléphone. On re-vérifie donc côté Python que
+    l'un des contacts porte bien ce numéro, pour ne jamais retourner un client
+    dont le seul tort est d'avoir ces chiffres dans son adresse.
+    """
+    cible = _chiffres(phone)
+    if not cible:
+        return None
+
+    url = f"{config.UCRM_BASE_URL}/crm/api/v1.0/clients"
+    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        r = await client.get(url, headers=_crm_headers(), params={"query": cible})
+        r.raise_for_status()
+        resultats = r.json() or []
+
+    for candidat in resultats:
+        for contact in candidat.get("contacts") or []:
+            if _chiffres(contact.get("phone")) == cible:
+                return int(candidat["id"])
+    return None
+
+
 _UCRM_SERVICE_STATUS = {
     0: "Prepared", 1: "Active", 2: "Ended", 3: "Suspended",
     4: "Cancelled", 5: "Quoted", 6: "Inactive", 7: "Obsolete",

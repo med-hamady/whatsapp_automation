@@ -32,6 +32,7 @@ from .validators import (
     validate_crm_balance,
     validate_document_type,
     validate_extraction,
+    validate_no_transaction_error,
     validate_payment_balance,
     validate_recipient_name,
 )
@@ -47,6 +48,7 @@ logger = logging.getLogger("whatsapp_automation.webhook.pipeline")
 _FAILURE_LABELS: dict[str, str] = {
     "client_not_found": "Client introuvable dans le CRM",
     "crm_unreachable": "CRM injoignable",
+    "transaction_error": "Transaction ÉCHOUÉE (capture d'erreur) — non encaissée",
 }
 
 
@@ -198,6 +200,24 @@ async def process(payload: dict) -> dict:
     if not valid_doc.ok:
         logger.info("document non-paiement écarté: %s (from=%s)", valid_doc.reason, from_phone)
         return {"status": "skipped", "reason": valid_doc.reason}
+
+    # Transaction échouée : la capture montre une pop-up « Erreur » (le paiement
+    # n'est pas passé côté opérateur). Le reçu sous-jacent reste lisible donc le
+    # montant/bénéficiaire seraient extraits à tort → on rejette et on notifie le
+    # support (le client a tenté un paiement qui a échoué).
+    valid_txn = validate_no_transaction_error(raw_text)
+    if not valid_txn.ok:
+        logger.info(
+            "transaction échouée (capture d'erreur) écartée (from=%s group=%s)",
+            from_phone, group_id or "-",
+        )
+        await _notify_support_failure(
+            reason="transaction_error",
+            from_phone=from_phone,
+            media_url=media_url,
+            group_id=group_id,
+        )
+        return {"status": "skipped", "reason": valid_txn.reason}
 
     valid_ext = validate_extraction(extracted)
     if not valid_ext.ok:

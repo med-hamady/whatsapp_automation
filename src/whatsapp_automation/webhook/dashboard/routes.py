@@ -106,6 +106,15 @@ def api_refusals(
     return events_db.refusals_by_cause(days=days, start=start or None, end=end or None)
 
 
+@router.get("/dashboard/api/operators", dependencies=[Depends(auth.require_session)])
+def api_operators(
+    days: int = Query(30, ge=1, le=3650),
+    start: str = Query(""),
+    end: str = Query(""),
+):
+    return events_db.payments_by_operator(days=days, start=start or None, end=end or None)
+
+
 @router.get("/dashboard/api/timeseries", dependencies=[Depends(auth.require_session)])
 def api_timeseries(
     days: int = Query(30, ge=1, le=3650),

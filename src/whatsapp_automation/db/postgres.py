@@ -34,30 +34,69 @@ def connection() -> Iterator[psycopg.Connection]:
         conn.close()
 
 
-def get_client_by_phone(phone: str) -> Optional[dict]:
-    """Retourne {idclient, info, mac, statu, ipaddress} ou None.
+def _search_clients(column: str, phone: str) -> list[dict]:
+    """Lignes `client` dont `column` contient le téléphone (sous-chaîne).
 
-    Le téléphone est cherché par sous-chaîne dans le champ texte `info`
-    (le schéma prod n'a pas de colonne phone dédiée sur la table client).
-
-    `idclient` est VARCHAR(250) en prod mais contient toujours un entier ;
-    on caste ici pour que tout le code en aval (modèle pydantic Client.id,
-    signatures UCRM, formats %d dans les logs) puisse le traiter comme int.
+    `column` est un littéral choisi par l'appelant (jamais une entrée utilisateur) ;
+    seule la valeur du téléphone est passée en paramètre lié.
     """
-    if not phone:
-        return None
     with connection() as conn:
         cur = conn.execute(
-            """SELECT idclient, info, mac, statu, ipaddress
-               FROM client
-               WHERE info LIKE %s
-               LIMIT 1""",
+            f"""SELECT idclient, info, mac, statu, ipaddress
+                FROM client
+                WHERE {column} LIKE %s""",
             (f"%{phone}%",),
         )
-        row = cur.fetchone()
-        if row is not None:
-            row["idclient"] = int(row["idclient"])
-        return row
+        rows = list(cur.fetchall())
+    for row in rows:
+        row["idclient"] = int(row["idclient"])
+    return rows
+
+
+def find_clients_by_phone(phone: str) -> list[dict]:
+    """Résout téléphone → lignes `client`, via `info` puis en repli `numero_crm`.
+
+    Le schéma prod n'a pas de colonne téléphone normalisée : le numéro est
+    historiquement préfixé dans le champ texte `info` ("37697850-Nom Client"),
+    et depuis peu recopié dans `numero_crm` (parfois PLUSIEURS numéros dans la
+    même cellule : "37954960/48588190" — d'où la recherche en sous-chaîne).
+
+    `info` reste prioritaire, et `numero_crm` n'est interrogé QUE s'il ne donne
+    rien : `numero_crm` porte parfois le numéro d'un revendeur partagé par
+    plusieurs clients distincts (ex : 38819364 sur 3 comptes "Bankily"). En
+    repli seulement, on ne retient donc que les lignes du PREMIER idclient
+    trouvé, pour ne jamais mélanger deux clients (le pipeline crédite le
+    paiement et débloque les MAC de toutes les lignes rendues).
+    """
+    if not phone:
+        return []
+    rows = _search_clients("info", phone)
+    if rows:
+        return rows
+
+    rows = _search_clients("numero_crm", phone)
+    if not rows:
+        return []
+    idclient = rows[0]["idclient"]
+    kept = [r for r in rows if r["idclient"] == idclient]
+    if len(kept) != len(rows):
+        logger.warning(
+            "lookup %s : numero_crm partagé par %d clients — on retient idclient=%d",
+            phone, len({r["idclient"] for r in rows}), idclient,
+        )
+    return kept
+
+
+def get_client_by_phone(phone: str) -> Optional[dict]:
+    """Retourne {idclient, info, mac, statu, ipaddress} ou None (1re ligne).
+
+    Voir ``find_clients_by_phone`` pour la stratégie de résolution du numéro.
+    `idclient` est VARCHAR(250) en prod mais contient toujours un entier ;
+    on caste pour que tout le code en aval (modèle pydantic Client.id,
+    signatures UCRM, formats %d dans les logs) puisse le traiter comme int.
+    """
+    rows = find_clients_by_phone(phone)
+    return rows[0] if rows else None
 
 
 def get_client_by_id(idclient: int | str) -> list[dict]:
@@ -87,20 +126,11 @@ def get_clients_by_phone(phone: str) -> list[dict]:
     équipements en prod : autant de lignes que de MAC distincts, partageant en
     général le même ``idclient``. Cet endpoint de consultation a besoin de
     toutes ces lignes pour exposer le MAC de chaque abonnement.
+
+    Même résolution du numéro que ``get_client_by_phone`` (`info` puis repli
+    `numero_crm`) : cf. ``find_clients_by_phone``.
     """
-    if not phone:
-        return []
-    with connection() as conn:
-        cur = conn.execute(
-            """SELECT idclient, info, mac, statu, ipaddress
-               FROM client
-               WHERE info LIKE %s""",
-            (f"%{phone}%",),
-        )
-        rows = cur.fetchall()
-    for row in rows:
-        row["idclient"] = int(row["idclient"])
-    return list(rows)
+    return find_clients_by_phone(phone)
 
 
 def insert_paiement(

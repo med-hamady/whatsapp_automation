@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -93,6 +94,22 @@ async def fetch_ucrm_context(idclient: int) -> tuple[Optional[dict], Optional[li
         ucrm_with_retry(lambda: ucrm.get_client_details(idclient), "get_client_details", idclient),
         ucrm_with_retry(lambda: ucrm.get_client_services(idclient), "get_client_services", idclient),
     )
+
+
+def parse_client_name(info: Optional[str]) -> Optional[str]:
+    """Extrait le nom depuis le champ libre `info` = "<phone>-<nom>".
+
+    Même logique que le dashboard (routes.py). Retourne None si le nom
+    ne peut pas être isolé (info vide, ou uniquement numérique)."""
+    info = (info or "").strip()
+    if not info:
+        return None
+    m = re.match(r"\s*(\d+)\s*[-:_ ]\s*(.*)", info)
+    name = (m.group(2).strip() if m else info) or None
+    # Un `info` purement numérique (ex "46618380") n'a pas de nom exploitable.
+    if name and name.replace(" ", "").isdigit():
+        return None
+    return name
 
 
 def credit_from_details(details: Optional[dict]) -> int:
@@ -248,6 +265,7 @@ def build_job(
         client=Client(
             id=client_row["idclient"],
             phone=phone_for_worker,
+            name=parse_client_name(client_row.get("info")),
             mac_address=client_row.get("mac"),
             ip_address=client_row.get("ipaddress"),
             current_status="suspended" if was_suspended else "active",
